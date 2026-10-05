@@ -1,6 +1,42 @@
 import { expect, it } from 'vite-plus/test'
+import * as z from 'zod'
 
+import { createNotificationModel } from '../../packages/better-notif/src/fields'
 import { contentSchema, listQuerySchema } from '../../packages/better-notif/src/schema'
+import type { StoredNotification } from '../../packages/better-notif/src/types'
+
+it('marks absent and null globally required output fields as legacy in retained records', async () => {
+    const model = createNotificationModel(
+        {
+            notification: {
+                additionalFields: {
+                    name: { type: 'string', validator: { output: z.string() } },
+                    optional: { type: 'string', required: false, validator: { output: z.string() } },
+                },
+            },
+        },
+        undefined,
+    )
+    const retained: StoredNotification = {
+        id: 'retained',
+        userId: 'user',
+        idempotencyKey: 'retained',
+        type: 'event',
+        title: 'Retained',
+        body: null,
+        actions: [],
+        createdAt: new Date(),
+        readAt: null,
+        archivedAt: null,
+    }
+    expect(await model.present(retained)).toMatchObject({ name: null, schemaStatus: 'legacy' })
+    expect(await model.present({ ...retained, name: null })).toMatchObject({ name: null, schemaStatus: 'legacy' })
+    expect(await model.present({ ...retained, name: 'Saved' })).toMatchObject({
+        name: 'Saved',
+        optional: null,
+        schemaStatus: 'current',
+    })
+})
 
 it('accepts navigable actions and rejects dangerous or ambiguous links', () => {
     for (const href of [

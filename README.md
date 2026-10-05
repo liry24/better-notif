@@ -111,6 +111,8 @@ await authClient.notification.deleteMany({ ids: ['one', 'two'] })
 
 Every browser operation requires a session and scopes database queries to that user. Foreign IDs behave like missing IDs. Bulk operations accept up to 100 IDs and return an item result for each attempted ID; they can partially succeed.
 
+Known client transport limitation: Better Auth's default decoder converts ISO-formatted strings into `Date` objects, including additional string fields and strings inside JSON fields. Exact string preservation needs to be resolved before the first release.
+
 `list` returns `{ notifications, total, nextCursor, hasMore }`, ordered by creation time and ID descending. Pass `nextCursor` as `cursor` with the same filters to continue. Results reflect live data. Filters include `type`, `read: 'all' | 'read' | 'unread'`, `archived: 'all' | 'archived' | 'unarchived'`, and `fields: { postId: '123' }`. They apply before the page limit; `total` counts all matching records, including older unread entries. The default is 20 unarchived notifications.
 
 `fields` permits equality checks only for explicitly configured `filterableFields`. Values use native database types; dates also accept ISO strings over HTTP. Private fields, JSON/array fields, and fields with adapter transforms cannot be enabled. `unreadCount({ query: { type, fields, archived } })` uses the same filters and always counts unread records; it excludes archived records by default.

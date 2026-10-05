@@ -266,7 +266,10 @@ export function createNotificationModel<F extends NotificationFields, K extends 
         const values: Record<string, unknown> = {}
         for (const [name, field] of Object.entries(fields)) {
             let value: unknown = row[name] ?? null
-            if ((required.has(name) && value === null) || (!field.validator?.output && !matchesField(value, field)))
+            if (
+                ((field.required || required.has(name)) && value === null) ||
+                (!field.validator?.output && !matchesField(value, field))
+            )
                 current = false
             if (field.returned === false) continue
             if (value !== null && field.validator?.output) {
