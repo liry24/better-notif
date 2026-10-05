@@ -4,7 +4,7 @@ Notifications for Better Auth: typed application fields, read/unread state, arch
 
 The first npm release is pending. Install a local tarball or a CI package preview. Supported runtime and Better Auth ranges are declared in the [package manifest](packages/better-notif/package.json). SQLite is the tested database.
 
-Node 22.16.0 or newer is supported. Better Auth's built-in SQLite adapter uses `StatementSync.columns()`, added in that release. Repository development uses Vite+, which requires Node 22.18.0 or a supported newer release.
+Node 22.0.0 or newer is supported with `better-sqlite3`. Using Better Auth with `node:sqlite` requires Node 22.16.0 or newer because that adapter uses `StatementSync.columns()`. Repository development uses Vite+, which requires Node 22.18.0 or a supported newer release.
 
 ## Register the plugin
 

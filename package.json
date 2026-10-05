@@ -20,6 +20,7 @@
         "test:integration": "vp test run --project integration",
         "test:client": "vp test run --project client",
         "test:consumer": "vp test run --project consumer",
+        "test:runtime": "node test/runtime/packed.mjs",
         "typecheck": "tsc --noEmit -p packages/better-notif/tsconfig.json && tsc --noEmit -p test/tsconfig.json",
         "unused": "knip && knip --production",
         "workspace:check": "sherif"
