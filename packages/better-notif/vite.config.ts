@@ -12,7 +12,7 @@ export default defineConfig({
             dts: { neverBundle: true },
             neverBundle: true,
         },
-        dts: true,
+        dts: { sourcemap: false },
         entry: { index: 'src/index.ts', client: 'src/client.ts' },
         exports: false,
         format: ['esm'],

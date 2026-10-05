@@ -1,5 +1,5 @@
 /* oxlint-disable typescript/no-unsafe-type-assertion -- Better Auth inference markers and its untyped client store require narrowing. */
-import type { BetterAuthClientPlugin, BetterAuthOptions } from 'better-auth'
+import type { BetterAuthClientPlugin, BetterAuthOptions, ClientStore } from 'better-auth'
 import type { AuthQueryState } from 'better-auth/client'
 import { atom, onMount } from 'nanostores'
 import type { WritableAtom } from 'nanostores'
@@ -33,7 +33,38 @@ type KindsOf<A extends { options: BetterAuthOptions }> =
         ? K
         : {}
 
-export function notificationClient<A extends { options: BetterAuthOptions } = DefaultAuth>() {
+type ClientFetch = Parameters<NonNullable<BetterAuthClientPlugin['getAtoms']>>[0]
+type NotificationView<A extends { options: BetterAuthOptions }> = ReturnType<
+    typeof createNotificationQuery<FieldsOf<A>, KindsOf<A>>
+>
+
+// A named return type keeps generic factory extraction concrete in emitted declarations.
+interface NotificationClientPlugin<A extends { options: BetterAuthOptions }> {
+    id: 'notification'
+    $InferServerPlugin: ServerPlugin<A>
+    getAtoms: ($fetch: ClientFetch) => {
+        $notificationSignal: WritableAtom<boolean>
+        $notificationEpoch: WritableAtom<number>
+        $notificationDefault: WritableAtom<NotificationView<A>>
+        $notificationViews: WritableAtom<Set<NotificationView<A>>>
+        notifications: NotificationQuery<FieldsOf<A>, KindsOf<A>>['notifications']
+        unreadNotificationCount: NotificationQuery<FieldsOf<A>, KindsOf<A>>['unreadCount']
+    }
+    getActions: (
+        $fetch: ClientFetch,
+        store: ClientStore,
+    ) => {
+        notification: {
+            refetch: (nextQuery?: NotificationListQuery<FieldsOf<A>>) => Promise<void>
+            createQuery: (query?: NotificationListQuery<FieldsOf<A>>) => NotificationQuery<FieldsOf<A>, KindsOf<A>>
+        }
+    }
+    atomListeners: { matcher: (path: string) => boolean; signal: '$notificationSignal' }[]
+}
+
+export function notificationClient<
+    A extends { options: BetterAuthOptions } = DefaultAuth,
+>(): NotificationClientPlugin<A> {
     type F = FieldsOf<A>
     type K = KindsOf<A>
     type View = ReturnType<typeof createNotificationQuery<F, K>>

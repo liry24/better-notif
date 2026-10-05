@@ -1,7 +1,10 @@
 {
     "extends": "../../tsconfig.json",
     "compilerOptions": {
+        "declarationMap": false,
+        "inlineSourceMap": false,
         "rootDir": ".",
+        "sourceMap": false,
         "types": ["node"]
     },
     "include": ["*.config.ts", "src"]

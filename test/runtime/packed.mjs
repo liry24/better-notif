@@ -30,6 +30,7 @@ try {
     const archiveName = `better-notif-${before}.tgz`
     const entries = run('tar', ['-tzf', tarball]).trim().split(/\r?\n/u)
     assert(entries.every((entry) => /^package\/(?:dist(?:\/.*)?|package.json|README.md|LICENSE)$/u.test(entry)))
+    assert(!entries.some((entry) => entry.endsWith('.map')), 'Packed files must not contain source maps')
     const license = run('tar', ['-xOf', tarball, 'package/LICENSE'])
     assert.equal(license, await readFile(join(root, 'LICENSE'), 'utf8'))
     assert.equal(license.split(/\r?\n/u)[2], 'Copyright (c) 2026 Liry24')
@@ -63,10 +64,10 @@ try {
             .map(async (entry) => {
                 const installedPath = resolve(installed, entry.slice('package/'.length))
                 assert(installedPath.startsWith(resolve(installed) + sep))
-                assert.deepEqual(
-                    await readFile(installedPath),
-                    execFileSync('tar', ['-xOf', tarball, entry], { cwd: directory }),
-                )
+                const packedBytes = execFileSync('tar', ['-xOf', tarball, entry], { cwd: directory })
+                if (entry.startsWith('package/dist/'))
+                    assert.doesNotMatch(packedBytes.toString('utf8'), /(?:sourceMappingURL|declarationMap)\s*[:=]/u)
+                assert.deepEqual(await readFile(installedPath), packedBytes)
             }),
     )
     const authVersion = JSON.parse(
