@@ -14,6 +14,7 @@ import {
 import { listNotifications, notificationWhere } from './query'
 import { identifier, listQuerySchema } from './schema'
 import { send, setState } from './server'
+import { notificationTransport } from './server-transport'
 export type {
     NotificationFilter,
     UserNotificationQuery,
@@ -66,6 +67,7 @@ export function notification<
     })
     return {
         id: 'notification',
+        ...notificationTransport,
         schema: model.schema,
         endpoints: {
             sendNotification: createAuthEndpoint.serverOnly(

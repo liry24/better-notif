@@ -162,6 +162,12 @@ const additionalFields = {
   amount: { type: 'number', required: false, validator: { input: z.string().transform(Number) } },
   slug: { type: 'string', required: false, validator: { input: v.pipe(v.string(), v.trim()) } },
   summary: { type: 'string', required: false, validator: { output: z.string().transform((value) => value.length) } },
+  label: { type: 'string', required: false },
+  metadata: { type: 'json', required: false, validator: { input: z.object({ values: z.array(z.string()) }) } },
+  timestamps: { type: 'string[]', required: false },
+  dueAt: { type: 'date', required: false },
+  displayDate: { type: 'date', required: false, validator: { output: z.date().transform((date) => date.toISOString()) } },
+  computedDate: { type: 'string', required: false, validator: { output: v.pipe(v.string(), v.transform((value) => new Date(value))) } },
 } as const
 const kinds = { invoice: { required: ['amount'] }, post: { required: ['slug'] } } as const
 const database = new DatabaseSync(':memory:')
@@ -174,7 +180,10 @@ await (await getMigrations(auth.options)).runMigrations()
 const registered = await auth.api.signUpEmail({ body: { name: 'Consumer', email: 'consumer@example.com', password: 'a-long-consumer-password' }, asResponse: true })
 assert.equal(registered.status, 200)
 const signup = await registered.json() as { user: { id: string } }
-const body = { recipients: [signup.user.id], notification: { type: 'invoice' as const, title: 'Packed', amount: '42' }, idempotencyKey: 'packed' }
+const iso = '2026-01-01T00:00:00.000Z'
+const precise = '2026-01-01T00:00:00.123456Z'
+const strings = [iso, precise, '2026-01-01T09:00:00+09:00']
+const body = { recipients: [signup.user.id], notification: { type: 'invoice' as const, title: iso, amount: '42', label: precise, metadata: { values: strings }, timestamps: strings, dueAt: new Date(iso), displayDate: new Date(iso), computedDate: iso, actions: [{ id: iso, label: precise, href: '/example' }] }, idempotencyKey: 'packed' }
 assert.equal((await auth.api.sendNotification({ body })).results[0]?.status, 'created')
 assert.equal((await auth.api.sendNotification({ body })).results[0]?.status, 'duplicate')
 const cookie = registered.headers.getSetCookie().map((value) => value.split(';')[0]).join('; ')
@@ -187,11 +196,33 @@ const packedClient = createAuthClient({ baseURL: 'http://localhost:3000', plugin
   request.headers.set('origin', 'http://localhost:3000')
   return auth.handler(request)
 } } })
+let transportCallbacks = 0
+const responseSchema = z.object({ notifications: z.array(z.object({ label: z.string(), dueAt: z.date(), displayDate: z.string(), computedDate: z.date(), metadata: z.object({ values: z.array(z.string()) }) }).passthrough()) }).passthrough()
+await packedClient.notification.list({ query: {} }, { output: responseSchema, onSuccess: ({ data }) => { responseSchema.parse(data); transportCallbacks++ } })
+assert.equal(transportCallbacks, 1)
 const invoiceView = packedClient.notification.createQuery({ fields: { amount: 42 }, type: 'invoice' })
 assertType<Concrete<typeof invoiceView>>(true)
 assertType<Concrete<typeof packedClient.notification.createQuery>>(true)
 await invoiceView.refetch()
 assert.equal(invoiceView.notifications.get().data?.total, 1)
+const transported = invoiceView.notifications.get().data!.notifications[0]!
+if (transported.schemaStatus === 'current') {
+  assertType<Equal<typeof transported.label, string | null>>(true)
+  assertType<Equal<typeof transported.metadata, { values: string[] } | null>>(true)
+  assertType<Equal<typeof transported.timestamps, string[] | null>>(true)
+  assertType<Equal<typeof transported.dueAt, Date | null>>(true)
+  assertType<Equal<typeof transported.displayDate, string | null>>(true)
+  assertType<Equal<typeof transported.computedDate, Date | null>>(true)
+}
+assert.equal(transported.schemaStatus, 'current')
+assert.equal(transported.label, precise)
+assert.deepEqual(transported.metadata, { values: strings })
+assert.deepEqual(transported.timestamps, strings)
+assert.deepEqual(transported.actions, body.notification.actions)
+assert.deepEqual(transported.dueAt, new Date(iso))
+assert.deepEqual(transported.computedDate, new Date(iso))
+assert.equal(transported.displayDate, iso)
+assert(transported.createdAt instanceof Date)
 assert.equal(invoiceView.unreadCount.get().data?.count, 1)
 invoiceView.dispose()
 const page = await auth.api.listUserNotifications({ query: { userIds: [signup.user.id] } })

@@ -6,6 +6,7 @@ import type { WritableAtom } from 'nanostores'
 
 import { createNotificationQuery } from './client-query'
 import type { NotificationQuery } from './client-query'
+import { notificationFetchPlugin } from './client-transport'
 import type { NotificationFields, NotificationKinds } from './fields'
 import type { notification } from './index'
 import type { NotificationListQuery } from './schema'
@@ -60,6 +61,7 @@ interface NotificationClientPlugin<A extends { options: BetterAuthOptions }> {
         }
     }
     atomListeners: { matcher: (path: string) => boolean; signal: '$notificationSignal' }[]
+    fetchPlugins: (typeof notificationFetchPlugin)[]
 }
 
 export function notificationClient<
@@ -71,6 +73,7 @@ export function notificationClient<
     return {
         id: 'notification',
         $InferServerPlugin: {} as ServerPlugin<A>,
+        fetchPlugins: [notificationFetchPlugin],
         getAtoms($fetch) {
             const signal = atom(false)
             const epoch = atom(0)

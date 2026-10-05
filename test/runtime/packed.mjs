@@ -94,6 +94,12 @@ let createdHooks = 0
 const auth = betterAuth({ database, baseURL: 'http://localhost:3000', secret: 'runtime-notification-secret-more-than-thirty-two-characters', emailAndPassword: { enabled: true }, advanced: { disableOriginCheck: false, disableCSRFCheck: false }, logger: { disabled: true }, plugins: [notification({ schema: { notification: { additionalFields: {
   amount: { type: 'number', required: false, validator: { input: z.string().transform(Number) } },
   slug: { type: 'string', required: false, validator: { input: v.pipe(v.string(), v.trim()) } },
+  label: { type: 'string', required: false },
+  metadata: { type: 'json', required: false, validator: { input: z.object({ values: z.array(z.string()) }) } },
+  timestamps: { type: 'string[]', required: false },
+  dueAt: { type: 'date', required: false },
+  displayDate: { type: 'date', required: false, validator: { output: z.date().transform((date) => date.toISOString()) } },
+  computedDate: { type: 'string', required: false, validator: { output: v.pipe(v.string(), v.transform((value) => new Date(value))) } },
 } } }, kinds: { invoice: { required: ['amount'] }, post: { required: ['slug'] } }, filterableFields: ['amount', 'slug'], onNotificationCreated: ({ notification: item }) => { createdHooks++; if (item.type === 'invoice') assert.equal(item.amount, 42) } })] })
 await (await getMigrations(auth.options)).runMigrations()
 const registered = await auth.api.signUpEmail({ body: { name: 'Consumer', email: 'consumer@example.com', password: 'a-long-consumer-password' }, asResponse: true })
@@ -101,7 +107,10 @@ assert.equal(registered.status, 200)
 const signup = await registered.json()
 const cookie = registered.headers.getSetCookie().map((value) => value.split(';')[0]).join('; ')
 const headers = { cookie, origin: 'http://localhost:3000' }
-const body = { recipients: [signup.user.id], idempotencyKey: 'invoice', notification: { type: 'invoice', title: 'Invoice', amount: '42' } }
+const iso = '2026-01-01T00:00:00.000Z'
+const precise = '2026-01-01T00:00:00.123456Z'
+const strings = [iso, precise, '2026-01-01T09:00:00+09:00']
+const body = { recipients: [signup.user.id], idempotencyKey: 'invoice', notification: { type: 'invoice', title: iso, amount: '42', label: precise, metadata: { values: strings }, timestamps: strings, dueAt: new Date(iso), displayDate: new Date(iso), computedDate: iso, actions: [{ id: iso, label: precise, href: '/example' }] } }
 const first = (await auth.api.sendNotification({ body })).results[0]
 assert.equal(first.status, 'created')
 assert.equal(first.notification.amount, 42)
@@ -131,6 +140,17 @@ const invoiceView = client.notification.createQuery({ fields: { amount: 42 } })
 const postView = client.notification.createQuery({ fields: { slug: 'hello' } })
 await Promise.all([invoiceView.refetch(), postView.refetch()])
 assert.equal(invoiceView.notifications.get().data.total, 1)
+const transported = invoiceView.notifications.get().data.notifications[0]
+assert.equal(transported.schemaStatus, 'current')
+assert.equal(transported.label, precise)
+assert.deepEqual(transported.metadata, { values: strings })
+assert.deepEqual(transported.timestamps, strings)
+assert.deepEqual(transported.actions, body.notification.actions)
+assert.deepEqual(transported.dueAt, new Date(iso))
+assert.deepEqual(transported.computedDate, new Date(iso))
+assert.equal(transported.displayDate, iso)
+assert(transported.createdAt instanceof Date)
+assert.deepEqual(JSON.parse(database.prepare('SELECT metadata FROM notification WHERE id = ?').get(first.notification.id).metadata), { values: strings })
 assert.equal(postView.notifications.get().data.total, 1)
 assert.equal(invoiceView.unreadCount.get().data.count, 1)
 await client.notification.setRead({ id: first.notification.id, read: true })

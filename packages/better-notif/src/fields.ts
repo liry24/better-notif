@@ -1,5 +1,5 @@
 /* oxlint-disable no-await-in-loop -- Field validators run in declaration order before any recipient writes. */
-import type { BetterAuthPluginDBSchema, DBFieldAttribute, InferDBValueType } from '@better-auth/core/db'
+import type { BetterAuthPluginDBSchema, DBFieldAttribute, DBPrimitive, InferDBValueType } from '@better-auth/core/db'
 import type { Where } from '@better-auth/core/db/adapter'
 import type { StandardSchemaV1 } from '@standard-schema/spec'
 import { APIError } from 'better-auth/api'
@@ -115,6 +115,10 @@ function isJSON(value: unknown, ancestors = new Set<object>()): boolean {
     return valid
 }
 
+function isJSONContainer(value: unknown): value is Extract<DBPrimitive, Record<string, unknown> | unknown[]> {
+    return value !== null && typeof value === 'object' && isJSON(value)
+}
+
 function matchesField(value: unknown, field: DBFieldAttribute): boolean {
     if (value === null || value === undefined) return field.required === false
     if (Array.isArray(field.type)) return typeof value === 'string' && field.type.includes(value)
@@ -128,7 +132,7 @@ function matchesField(value: unknown, field: DBFieldAttribute): boolean {
         case 'date':
             return value instanceof Date && Number.isFinite(value.getTime())
         case 'json':
-            return isJSON(value)
+            return isJSONContainer(value)
         case 'string[]':
             return Array.isArray(value) && isJSON(value) && value.every((v) => typeof v === 'string')
         case 'number[]':
@@ -219,7 +223,35 @@ export function createNotificationModel<F extends NotificationFields, K extends 
         notification: {
             ...baseSchema.notification,
             ...(config?.notification?.modelName ? { modelName: config.notification.modelName } : {}),
-            fields: { ...baseSchema.notification.fields, ...fields },
+            fields: Object.fromEntries(
+                Object.entries({ ...baseSchema.notification.fields, ...fields }).map(
+                    ([name, field]: [string, DBFieldAttribute]): [string, DBFieldAttribute] => {
+                        if (!['json', 'string[]', 'number[]'].includes(String(field.type))) return [name, field]
+                        const output = field.transform?.output
+                        return [
+                            name,
+                            {
+                                ...field,
+                                transform: {
+                                    ...field.transform,
+                                    async output(value) {
+                                        const transformed = output ? await output(value) : value
+                                        if (typeof transformed !== 'string') return transformed
+                                        // Core's fallback JSON decoder revives strings as Dates. Parse containers first.
+                                        try {
+                                            const parsed: unknown = JSON.parse(transformed)
+                                            if (isJSONContainer(parsed)) return parsed
+                                        } catch {
+                                            // Let the native adapter retain its handling of malformed historical values.
+                                        }
+                                        return transformed
+                                    },
+                                },
+                            } satisfies DBFieldAttribute,
+                        ]
+                    },
+                ),
+            ),
         },
     } satisfies BetterAuthPluginDBSchema
 

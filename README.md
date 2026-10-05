@@ -46,7 +46,7 @@ export const auth = betterAuth({
 
 Zod, Valibot, and other Standard Schema validators work through `validator.input`. Synchronous and asynchronous validators run before recipient processing. Their transformed values must fit the declared database field type. Native defaults, `input: false`, `returned: false`, `fieldName`, references, indexes, and adapter transforms retain their roles. Use `modelName` to rename the table. Built-in field names and duplicate column names are rejected.
 
-There is no required `data` field or schema-conversion step. Add a native `json` field explicitly when your application needs one. JSON fields must contain JSON-safe values; native date fields accept `Date` objects.
+There is no required `data` field or schema-conversion step. Add a native `json` field explicitly when your application needs one. Its stored root must be a JSON-safe object or array (or `null` for an optional field); nested JSON scalars are supported. Use native string, number, or boolean fields for scalar roots. Native date fields accept `Date` objects. Output validators may explicitly return JSON-safe values or a `Date`.
 
 Generate the database schema with the [official Better Auth CLI](https://better-auth.com/docs/concepts/cli):
 
@@ -111,7 +111,9 @@ await authClient.notification.deleteMany({ ids: ['one', 'two'] })
 
 Every browser operation requires a session and scopes database queries to that user. Foreign IDs behave like missing IDs. Bulk operations accept up to 100 IDs and return an item result for each attempted ID; they can partially succeed.
 
-Known client transport limitation: Better Auth's default decoder converts ISO-formatted strings into `Date` objects, including additional string fields and strings inside JSON fields. Exact string preservation needs to be resolved before the first release.
+The client preserves strings exactly, including ISO-formatted strings inside JSON and arrays, and restores actual server `Date` values. Successful notification responses carry an `x-better-notif-date-paths` header; their JSON body stays unchanged. The client applies this metadata before output validation, success callbacks, and query updates. Other auth routes and error responses keep the caller's parser. Proxies must preserve this header; the server adds it to `Access-Control-Expose-Headers` for browser access. Custom hooks that change notification response values must run before this plugin's after hook.
+
+Date metadata is ASCII JSON `{ v: 1, paths: string[][] }`, limited to 6 KiB. A `*` segment selects array elements whose existing values at that path are dates or `null`, skipping absent branches such as missing batch records. This keeps ordinary 100-record responses within the limit. Missing, malformed, or oversized metadata fails explicitly rather than guessing which strings are dates. Excessive application date fields return `NOTIFICATION_TRANSPORT_LIMIT`; reduce the page/batch size or returned date fields. Writes already completed are not rolled back: error bodies include `mutationResults` with IDs, statuses, hook outcomes, and batch continuation metadata so callers can reconcile them.
 
 `list` returns `{ notifications, total, nextCursor, hasMore }`, ordered by creation time and ID descending. Pass `nextCursor` as `cursor` with the same filters to continue. Results reflect live data. Filters include `type`, `read: 'all' | 'read' | 'unread'`, `archived: 'all' | 'archived' | 'unarchived'`, and `fields: { postId: '123' }`. They apply before the page limit; `total` counts all matching records, including older unread entries. The default is 20 unarchived notifications.
 

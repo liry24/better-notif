@@ -24,12 +24,18 @@ export async function setup<
     TContext = undefined,
     const F extends NotificationFields = {},
     const K extends NotificationKinds<F> = {},
->(options: NotificationOptions<TContext, F, K> = {}, filename = ':memory:', hooks?: BetterAuthOptions['hooks']) {
+>(
+    options: NotificationOptions<TContext, F, K> = {},
+    filename = ':memory:',
+    hooks?: BetterAuthOptions['hooks'],
+    basePath = '/api/auth',
+) {
     const database = new DatabaseSync(filename)
     database.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;')
     const auth = betterAuth({
         database,
         baseURL: 'http://localhost:3000',
+        basePath,
         secret: 'notification-test-secret-at-least-thirty-two-characters',
         emailAndPassword: { enabled: true },
         advanced: { disableOriginCheck: false, disableCSRFCheck: false },
@@ -76,7 +82,7 @@ export async function setup<
         const requestHeaders = new Headers(headers)
         if (body !== undefined) requestHeaders.set('content-type', 'application/json')
         return auth.handler(
-            new Request(`http://localhost:3000/api/auth${path}`, {
+            new Request(`http://localhost:3000${basePath}${path}`, {
                 headers: requestHeaders,
                 method: body === undefined ? 'GET' : 'POST',
                 ...(body === undefined ? {} : { body: JSON.stringify(body) }),
