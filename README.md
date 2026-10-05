@@ -12,31 +12,30 @@ import { notification } from 'better-notif'
 import * as z from 'zod'
 
 export const auth = betterAuth({
-    // Your existing database and authentication configuration.
-    plugins: [
-        notification({
-            schema: {
-                notification: {
-                    additionalFields: {
-                        postId: {
-                            type: 'string',
-                            required: false,
-                            validator: { input: z.string().min(1) },
-                        },
-                        amount: {
-                            type: 'number',
-                            required: false,
-                            validator: { input: z.string().transform(Number) },
-                        },
-                    },
-                },
+  plugins: [
+    notification({
+      schema: {
+        notification: {
+          additionalFields: {
+            postId: {
+              type: 'string',
+              required: false,
+              validator: { input: z.string().min(1) },
             },
-            kinds: {
-                'post.published': { required: ['postId'] },
-                'invoice.ready': { required: ['amount'] },
+            amount: {
+              type: 'number',
+              required: false,
+              validator: { input: z.string().transform(Number) },
             },
-        }),
-    ],
+          },
+        },
+      },
+      kinds: {
+        'post.published': { required: ['postId'] },
+        'invoice.ready': { required: ['amount'] },
+      },
+    }),
+  ],
 })
 ```
 
@@ -60,16 +59,16 @@ For Prisma or Drizzle, apply the generated schema through your ORM's migration t
 
 ```ts
 const result = await auth.api.sendNotification({
-    body: {
-        recipients: ['user-1'], // One or more IDs, or 'all'.
-        idempotencyKey: 'post:123:published',
-        notification: {
-            type: 'post.published',
-            title: 'Your post is ready',
-            postId: '123',
-            actions: [{ id: 'view', label: 'View post', href: '/posts/123' }],
-        },
+  body: {
+    recipients: ['user-1'], // One or more IDs, or 'all'.
+    idempotencyKey: 'post:123:published',
+    notification: {
+      type: 'post.published',
+      title: 'Your post is ready',
+      postId: '123',
+      actions: [{ id: 'view', label: 'View post', href: '/posts/123' }],
     },
+  },
 })
 ```
 
@@ -89,13 +88,13 @@ import { notificationClient } from 'better-notif/client'
 import type { auth } from './auth'
 
 export const authClient = createAuthClient({
-    plugins: [notificationClient<typeof auth>()],
+  plugins: [notificationClient<typeof auth>()],
 })
 
 const response = await authClient.notification.list({ query: { limit: 20 } })
 const item = response.data?.notifications[0]
 if (item?.schemaStatus === 'current' && item.type === 'post.published') {
-    item.postId.toUpperCase()
+  item.postId.toUpperCase()
 }
 
 await authClient.notification.setRead({ id: 'notification-id', read: true })
@@ -119,12 +118,12 @@ Use these server-only APIs for jobs operating on explicit users, without a sessi
 
 ```ts
 const page = await auth.api.listUserNotifications({
-    query: { userIds: ['user-1'], filter: { type: 'post.published', read: 'unread' } },
+  query: { userIds: ['user-1'], filter: { type: 'post.published', read: 'unread' } },
 })
 await auth.api.setUserNotificationsRead({ body: { userIds: ['user-1'], read: true } })
 await auth.api.setUserNotificationsArchived({ body: { userIds: ['user-1'], archived: false } })
 await auth.api.deleteUserNotifications({
-    body: { userIds: 'all', filter: { archived: 'archived', createdBefore: '2026-01-01' } },
+  body: { userIds: 'all', filter: { archived: 'archived', createdBefore: '2026-01-01' } },
 })
 const count = await auth.api.getUserUnreadNotificationCount({ query: { userIds: ['user-1'] } })
 ```

@@ -2,6 +2,7 @@ import { defineConfig } from 'vite-plus'
 export default defineConfig({
     fmt: {
         ignorePatterns: [
+            '**/*.md',
             '**/.nuxt/**',
             '**/.nitro/**',
             '**/.output/**',

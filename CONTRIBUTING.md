@@ -15,6 +15,8 @@ node node_modules/vite-plus/dist/bin.js run check
 
 The aggregate `check` runs Vite+ formatting, typed linting and type checking, Sherif, Knip (development and production), public declaration tests, library build with ATTW/publint, and all runtime/consumer tests. `vp check` alone is the Vite+ static check command; use `vp run check` for the repository's full gate. Use `vp run deps:update` for dependency updates, then inspect changes and run the full gate.
 
+Markdown files are excluded from `vp fmt`. Maintain their code snippets with two-space indentation.
+
 Build and create a local package archive:
 
 ```sh
