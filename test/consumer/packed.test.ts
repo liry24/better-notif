@@ -3,7 +3,7 @@ import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { mkdtemp, mkdir, readFile, readdir, rm, writeFile, copyFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { expect, it } from 'vite-plus/test'
@@ -11,19 +11,19 @@ import { expect, it } from 'vite-plus/test'
 const root = fileURLToPath(new URL('../../', import.meta.url))
 const packageDirectory = join(root, 'packages/better-notif')
 
-function run(program: string, args: string[], cwd: string) {
+function run(program: string, args: string[], cwd: string, env = process.env) {
     try {
         if (process.platform === 'win32' && program === 'npm') {
             return execFileSync(
                 process.execPath,
                 [join(dirname(process.execPath), 'node_modules/npm/bin/npm-cli.js'), ...args],
-                { cwd, encoding: 'utf8', stdio: 'pipe' },
+                { cwd, env, encoding: 'utf8', stdio: 'pipe' },
             )
         }
         if (process.platform === 'win32' && program === 'pnpm') {
-            return run('npm', ['exec', '--yes', '--package=pnpm@10.25.0', '--', 'pnpm', ...args], cwd)
+            return run('npm', ['exec', '--yes', '--package=pnpm@10.25.0', '--', 'pnpm', ...args], cwd, env)
         }
-        return execFileSync(program, args, { cwd, encoding: 'utf8', stdio: 'pipe' })
+        return execFileSync(program, args, { cwd, env, encoding: 'utf8', stdio: 'pipe' })
     } catch (error) {
         if (error instanceof Error && 'stdout' in error && typeof error.stdout === 'string') {
             throw new Error(`${error.message}\n${error.stdout}`, { cause: error })
@@ -57,10 +57,15 @@ it('installs and exercises the actual tarball in an isolated consumer', async ()
             await readFile(join(root, 'LICENSE'), 'utf8'),
         )
         const packedManifest = JSON.parse(run('tar', ['-xOf', tarball, 'package/package.json'], directory)) as {
+            name: string
+            version: string
             license?: string
         }
+        expect(packedManifest.name).toBe('better-notif')
+        expect(packedManifest.version).toEqual(expect.any(String))
         expect(packedManifest.license).toBe('MIT')
-        await copyFile(tarball, join(directory, 'package.tgz'))
+        const archiveName = `better-notif-${before}.tgz`
+        await copyFile(tarball, join(directory, archiveName))
         const version = process.env.NOTIFICATION_BETTER_AUTH_VERSION ?? '1.7.7'
         const manager = process.env.NOTIFICATION_PACKAGE_MANAGER ?? 'bun'
         assert(['bun', 'npm', 'pnpm'].includes(manager), 'Unsupported consumer package manager')
@@ -71,7 +76,7 @@ it('installs and exercises the actual tarball in an isolated consumer', async ()
                 private: true,
                 type: 'module',
                 dependencies: {
-                    'better-notif': 'file:./package.tgz',
+                    'better-notif': `file:./${archiveName}`,
                     'better-auth': version,
                     '@better-auth/core': version,
                     zod: '^4.5.4',
@@ -80,7 +85,23 @@ it('installs and exercises the actual tarball in an isolated consumer', async ()
                 devDependencies: { typescript: '^7.0.2', '@types/node': '^26.6.3', auth: '1.7.7' },
             }),
         )
-        run(manager, ['install', '--ignore-scripts'], directory)
+        // Bun can share file-tarball cache entries across independent consumers.
+        run(manager, ['install', '--ignore-scripts'], directory, {
+            ...process.env,
+            BUN_INSTALL_CACHE_DIR: join(directory, 'bun-cache'),
+        })
+        const installedDirectory = join(directory, 'node_modules/better-notif')
+        const installedManifest: unknown = JSON.parse(await readFile(join(installedDirectory, 'package.json'), 'utf8'))
+        expect(installedManifest).toEqual(packedManifest)
+        for (const entry of entries.filter((name) => !name.endsWith('/') && name !== 'package/dist')) {
+            const relativePath = entry.slice('package/'.length)
+            const installedPath = resolve(installedDirectory, relativePath)
+            assert(installedPath.startsWith(resolve(installedDirectory) + sep))
+            const packedBytes = execFileSync('tar', ['-xOf', tarball, entry], { cwd: directory })
+            expect(await readFile(installedPath), `Installed ${relativePath} must match the archive`).toEqual(
+                packedBytes,
+            )
+        }
         await writeFile(
             join(directory, 'tsconfig.json'),
             JSON.stringify({
