@@ -1,213 +1,155 @@
-# better-auth-notification
+# better-notif
 
-User notifications for Better Auth, with idempotent delivery, read state, archives, and application-owned delivery hooks.
+Notifications for Better Auth: typed application fields, read/unread state, archiving, deletion, and application-owned delivery hooks.
 
-Requires **Better Auth 1.7.7–1.7.x** and **Node.js 24+**. SQLite is the verified database. The package uses Better Auth's adapter; other databases are not yet tested or guaranteed. Bun manages this repository's dependencies.
+The first npm release is pending. Install a local tarball or a CI package preview; see [Contributing](CONTRIBUTING.md) for building one. Supported runtime and Better Auth ranges are declared in the [package manifest](packages/better-notif/package.json). SQLite is the tested database.
 
-The first npm release is not published yet. Use the package preview produced by GitHub Actions, or build a local tarball:
-
-```sh
-bun install
-bun run build
-cd packages/better-auth-notification
-bun pm pack
-# In your app: bun add /absolute/path/to/better-auth-notification-0.1.0.tgz
-```
-
-## Setup
+## Register the plugin
 
 ```ts
 import { betterAuth } from 'better-auth'
-import { notification } from 'better-auth-notification'
+import { notification } from 'better-notif'
+import * as z from 'zod'
 
 export const auth = betterAuth({
     // Your existing database and authentication configuration.
-    plugins: [notification()],
+    plugins: [
+        notification({
+            schema: {
+                notification: {
+                    additionalFields: {
+                        postId: {
+                            type: 'string',
+                            required: false,
+                            validator: { input: z.string().min(1) },
+                        },
+                        amount: {
+                            type: 'number',
+                            required: false,
+                            validator: { input: z.string().transform(Number) },
+                        },
+                    },
+                },
+            },
+            kinds: {
+                'post.published': { required: ['postId'] },
+                'invoice.ready': { required: ['amount'] },
+            },
+        }),
+    ],
 })
 ```
 
-Generate and apply the schema using the [Better Auth CLI](https://www.better-auth.com/docs/concepts/cli). The plugin adds a `notification` table, a unique index on `(userId, idempotencyKey)`, and an index on `(userId, createdAt)`. The unique constraint is required for concurrent delivery safety. Apply migrations before serving requests. User deletion cascades to their notifications.
+`additionalFields` uses Better Auth's native `DBFieldAttribute` definitions. The example creates nullable `postId` and `amount` columns on one `notification` table. `kinds` lists fields required when sending each kind; it does not redefine their types. A field with `required: true` (the default) is required for every notification. Omit `kinds`, or pass `{}`, to accept arbitrary type strings.
+
+Zod, Valibot, and other Standard Schema validators work through `validator.input`. Synchronous and asynchronous validators run before recipient processing. Their transformed values must fit the declared database field type. Native defaults, `input: false`, `returned: false`, `fieldName`, references, indexes, and adapter transforms retain their roles. Use `modelName` to rename the table. Built-in field names and duplicate column names are rejected.
+
+There is no required `data` field or schema-conversion step. Add a native `json` field explicitly when your application needs one. JSON fields must contain JSON-safe values; native date fields accept `Date` objects.
+
+Generate the database schema with the [official Better Auth CLI](https://better-auth.com/docs/concepts/cli):
 
 ```sh
-# Built-in SQLite adapter:
-bunx @better-auth/cli@1.7.7 migrate
+bunx auth@1.7.7 generate
+# Built-in SQLite adapter: apply the migration directly.
+bunx auth@1.7.7 migrate
 ```
 
-## Send to one user, many users, or everyone
+For Prisma or Drizzle, apply the generated schema through your ORM's migration tooling. The plugin requires its unique `(userId, idempotencyKey)` index for concurrent send safety. Registration, database migration, and the separate browser client plugin are the normal integration steps.
 
-`sendNotification` is a **server-only** API with no HTTP route. A single recipient is a one-element array. The return shape is identical for every recipient count.
+## Send from your server
 
 ```ts
 const result = await auth.api.sendNotification({
     body: {
-        recipients: ['user-1'], // Multiple IDs, or 'all'.
+        recipients: ['user-1'], // One or more IDs, or 'all'.
         idempotencyKey: 'post:123:published',
         notification: {
             type: 'post.published',
             title: 'Your post is ready',
-            body: 'Review the published post.',
-            data: { postId: '123' },
-            actions: [{ id: 'view-post', label: 'View post', href: '/posts/123' }],
+            postId: '123',
+            actions: [{ id: 'view', label: 'View post', href: '/posts/123' }],
         },
     },
 })
 ```
 
-Each result contains a `userId` and one of these statuses:
+`sendNotification` is server-only: it has no HTTP route and is absent from the browser client. Input types, results, and hooks infer your additional fields. For `invoice.ready`, `amount` is required as a string on input and becomes a number after validation.
 
-| Status      | Meaning                                                                                                         |
-| ----------- | --------------------------------------------------------------------------------------------------------------- |
-| `created`   | Saved a new notification; includes `notification` and `hook`.                                                   |
-| `duplicate` | The same user and key already have identical content; includes the existing notification and `hook: 'skipped'`. |
-| `skipped`   | The application's filter returned `false`.                                                                      |
-| `failed`    | This recipient failed; includes an error `code` and `message`. Other recipients continue.                       |
+Results contain `created`, `duplicate`, `skipped`, or `failed` per recipient. A duplicate returns the saved notification without replaying the creation hook. Reusing a key with different validated, explicitly supplied content returns `NOTIFICATION_IDEMPOTENCY_CONFLICT`. Generated defaults and adapter transforms are excluded from the comparison; the first saved values are retained. JSON object key order does not matter.
 
-A reused key with different content produces `NOTIFICATION_IDEMPOTENCY_CONFLICT`. Existing content and read/archive state remain unchanged. JSON object key order does not affect equality; array order does. Use a new key for a new logical notification. Keys are scoped to users, so one event key can be shared across an entire campaign.
+Each call scans at most 100 recipients. `recipients` accepts up to 10,000 explicit IDs; IDs are deduplicated and sorted. Use `limit` and the returned `nextCursor` to continue, keeping the other inputs consistent. Retry failed recipient IDs separately without a cursor. Lists and cursors reflect live data, so save an explicit audience in your application when a fixed snapshot is needed.
 
-`recipients` accepts up to 10,000 IDs and removes duplicates. Results follow ID order. Each call scans **at most 100 candidates**, even when none pass the filter. Set `limit` from 1 to 100 to reduce the batch size. Continue with the returned `nextCursor`:
+`filter({ user, accounts, sessions, context })` can select recipients asynchronously. Add application data with `loadContext` on the plugin. Account credentials and session tokens are excluded; context is not persisted or sent to the browser. Existing duplicates skip context loading and filtering.
+
+## Browser integration
 
 ```ts
-let cursor: string | undefined
-do {
-    const result = await auth.api.sendNotification({
-        body: {
-            recipients: 'all',
-            idempotencyKey: 'maintenance:2026-10',
-            notification: { type: 'maintenance', title: 'Scheduled maintenance' },
-            ...(cursor === undefined ? {} : { cursor }),
-            filter: ({ user, accounts }) =>
-                user.emailVerified && accounts.some((account) => account.providerId === 'google'),
-        },
-    })
-    // Record failed user IDs and inspect each created result's hook status.
-    // Retry failed IDs with the same key and content, without a cursor.
-    cursor = result.nextCursor ?? undefined
-} while (cursor !== undefined)
-```
+import { createAuthClient } from 'better-auth/react' // Also /vue or /client.
+import { notificationClient } from 'better-notif/client'
+import type { auth } from './auth'
 
-The loop can run in your existing job system. The plugin does not run a worker or persist campaign progress. Store the cursor in your application to resume; keep the recipients, key, content and filter consistent. A batch-level error before candidates are loaded rejects the call; retry that cursor. Recipient failures are returned and advance the cursor, so retry their IDs separately.
-
-Each batch evaluates current data. There is no audience snapshot, and new IDs behind the cursor are not revisited. For a fixed audience, save an ID list in your app and send that list in batches. Notifications already saved remain in the recipient's personal inbox if their attributes or organization membership later change.
-
-## Recipient conditions and related data
-
-Every new candidate loads `user`, all linked `accounts`, and all currently valid `sessions` before filtering. Filters can be synchronous or asynchronous and must return a boolean. Duplicate notifications return directly without rerunning the filter or loading related data.
-
-- `user` includes Better Auth user fields and configured additional fields. Additional fields are typed as `unknown`; narrow them in application code.
-- `accounts` includes IDs, provider, scope, creation/update dates, and token expiry dates. It excludes passwords and access/refresh/ID tokens.
-- `sessions` includes IDs, creation/update/expiry dates, IP address and user agent, with no session token. When Better Auth uses secondary session storage, its session-listing API is used.
-- Related rows are paginated internally; the adapter's default row limit does not truncate the context.
-
-Use `loadContext` to add organization membership, billing, or other application data. Its return type flows into `filter` and the creation hook. `context` is optional because the loader itself is optional.
-
-```ts
-const notifications = notification({
-    loadContext: async ({ user, accounts, sessions }) => ({
-        verified: user.emailVerified,
-        hasGoogleAccount: accounts.some((account) => account.providerId === 'google'),
-        hasActiveSession: sessions.length > 0,
-        // organizationIds: await yourDatabase.lookupOrganizations(user.id),
-    }),
+export const authClient = createAuthClient({
+    plugins: [notificationClient<typeof auth>()],
 })
 
-const auth = betterAuth({
-    // Your existing database configuration.
-    plugins: [notifications],
-})
+const response = await authClient.notification.list({ query: { limit: 20 } })
+const item = response.data?.notifications[0]
+if (item?.schemaStatus === 'current' && item.type === 'post.published') {
+    item.postId.toUpperCase()
+}
 
-await auth.api.sendNotification({
-    body: {
-        recipients: 'all',
-        idempotencyKey: 'welcome:verified',
-        notification: { type: 'welcome', title: 'Welcome back' },
-        filter: ({ context }) => context?.verified === true && context.hasActiveSession,
-    },
-})
-```
-
-Conditions run in application code after loading candidates; they are not translated into SQL. Use explicit ID batches selected by your own database for large audiences. Organization and role rules belong to the app. Recipient context is never automatically persisted in notifications or sent to the browser.
-
-## Hooks and delivery guarantees
-
-Configure these hooks on `notification()`:
-
-| Hook                    | Payload                                       |
-| ----------------------- | --------------------------------------------- |
-| `onNotificationCreated` | `{ notification, recipient, idempotencyKey }` |
-| `onReadStateChanged`    | `{ notificationId, userId, readAt }`          |
-| `onArchiveStateChanged` | `{ notificationId, userId, archivedAt }`      |
-
-Hooks run after successful database writes and are awaited. Duplicate sends and no-op state changes do not call them. Read/archive transitions are conditional database updates, so concurrent identical operations only trigger one hook. Concurrent distinct operations do not guarantee hook ordering.
-
-```ts
-notification({
-    onNotificationCreated: async ({ notification, recipient }) => {
-        // Use your application's mail client or durable queue here:
-        // await mailQueue.enqueue({
-        //     idempotencyKey: notification.id,
-        //     to: recipient.user.email,
-        //     subject: notification.title,
-        //     text: notification.body ?? notification.title,
-        // })
-    },
-})
-```
-
-`hook` is `completed`, `failed`, or `skipped`. A completed hook means the callback completed, not that an email reached its destination. Hook failure preserves the database write and returns `hook: 'failed'`; internal exception details are not returned to recipients. Errors are logged without callback payloads or provider credentials.
-
-The plugin provides database idempotency, **not guaranteed external delivery**. A process can stop after saving and before invoking the hook. There is no outbox or automatic hook retry, and resending the same notification will not retry its creation hook. If durable external delivery is required, own the queue/reconciliation in your app and use the stable notification ID as the external idempotency key.
-
-## Read state, archives, and client state
-
-```ts
-import { createAuthClient } from 'better-auth/vue' // Or /react, or /client for vanilla.
-import { notificationClient } from 'better-auth-notification/client'
-
-export const authClient = createAuthClient({ plugins: [notificationClient()] })
-
-const { data, error } = await authClient.notification.list({
-    query: { limit: 20, offset: 0, read: 'all', archived: 'unarchived' },
-})
 await authClient.notification.setRead({ id: 'notification-id', read: true })
 await authClient.notification.setRead({ id: 'notification-id', read: false })
 await authClient.notification.setArchived({ id: 'notification-id', archived: true })
-await authClient.notification.setArchived({ id: 'notification-id', archived: false })
-const unread = await authClient.notification.unreadCount()
+await authClient.notification.delete({ id: 'notification-id' })
+await authClient.notification.setReadMany({ ids: ['one', 'two'], read: true })
+await authClient.notification.setArchivedMany({ ids: ['one', 'two'], archived: false })
+await authClient.notification.deleteMany({ ids: ['one', 'two'] })
 ```
 
-All recipient endpoints require a session and enforce ownership in database queries. Other users' IDs behave like missing notifications. There is no administrator/broadcast HTTP endpoint.
+Every browser operation requires a session and scopes database queries to that user. Foreign IDs behave like missing IDs. Bulk operations accept up to 100 IDs and return an item result for each attempted ID; they can partially succeed.
 
-The list returns `{ notifications, total, nextOffset }` in newest-first order. It defaults to 20 unarchived notifications; `limit` is capped at 100. Filters are `read: 'all' | 'read' | 'unread'` and `archived: 'all' | 'archived' | 'unarchived'`. Offset pagination is a live view, so new arrivals and state changes can shift page boundaries. The unread count excludes archived notifications. Archiving does not mark a notification read; unarchiving restores its previous read state.
+`list` returns `{ notifications, total, nextOffset }`, newest first. Filters are `read: 'all' | 'read' | 'unread'` and `archived: 'all' | 'archived' | 'unarchived'`; the default is 20 unarchived notifications. `unreadCount()` excludes archived notifications. Archiving preserves read state; unarchive with `archived: false`.
 
-The standard Better Auth client exposes shared query state:
+React and Vue clients expose `useNotifications()` and `useUnreadNotificationCount()`. Vanilla clients expose subscribable atoms under the same names. Mutations refresh subscribed list/count state, and session changes clear previous-user data. Refresh new arrivals with `authClient.notification.refetch()`; no polling or push connection is installed. Pass a list query to `refetch` to change the shared page/filter. SSR does not automatically fetch these queries.
+
+## Trusted server management
+
+Use these server-only APIs for jobs operating on explicit users, without a session cookie:
 
 ```ts
-// Vue: refs. React: hook state objects.
-const notifications = authClient.useNotifications()
-const unreadCount = authClient.useUnreadNotificationCount()
-
-// Manual refresh, optionally changing the shared list filter/page:
-await authClient.notification.refetch({ read: 'unread', archived: 'unarchived' })
+const page = await auth.api.listUserNotifications({
+    query: { userIds: ['user-1'], filter: { type: 'post.published', read: 'unread' } },
+})
+await auth.api.setUserNotificationsRead({ body: { userIds: ['user-1'], read: true } })
+await auth.api.setUserNotificationsArchived({ body: { userIds: ['user-1'], archived: false } })
+await auth.api.deleteUserNotifications({
+    body: { userIds: 'all', filter: { archived: 'archived', createdBefore: '2026-01-01' } },
+})
+const count = await auth.api.getUserUnreadNotificationCount({ query: { userIds: ['user-1'] } })
 ```
 
-For vanilla clients, `useNotifications` and `useUnreadNotificationCount` are subscribable atoms. Query state includes `data`, `error`, `isPending`, `isRefetching`, and `refetch`. Read/archive mutations invalidate subscribed list/count queries. Session changes clear the previous data, and late responses from a previous user are ignored. Better Auth defers its session signals briefly after auth mutations. New notifications created elsewhere need a manual refresh; no polling, SSE or WebSocket connection is installed. SSR does not automatically fetch shared queries.
+`userIds` is required: up to 100 IDs or explicit `'all'`. Listing and mutations also accept `ids`, `filter`, `limit`, and `cursor`. Supported filters are `type`, `read`, `archived`, and `createdBefore`. They process at most 100 records per call in ID order; continue with `nextCursor`. Mutation results are `updated`, `unchanged`, `deleted`, `not_found`, or `failed`. Failed IDs advance the cursor and need separate retries. These endpoints have no HTTP route; any application route wrapping them owns its authorization.
 
-## Content and actions
+Deletion is physical. Deleting a notification also removes its idempotency record, so sending the same key again can create a notification and run the creation hook again. There is no deletion hook or tombstone.
 
-`type` and `title` are required. `body` defaults to `null`, JSON object `data` to `{}`, and `actions` to `[]`. Title/body are plain text for the application to render. Limits: 100 characters for type, 500 for title, 10,000 for body, 256 for IDs/idempotency keys, and 10 actions per notification.
+## Hooks and retained data
 
-Actions contain a unique `id`, a `label` (up to 200 characters), and an optional `href` (up to 2,048 characters). A URL must be a root-relative app path or HTTP(S) URL; protocol-relative URLs, embedded credentials, backslashes and control characters are rejected. Actions without URLs can open app-owned dialogs using their identifier. The app owns action authorization, execution, completion state and side-effect idempotency. Clicking an action does not automatically change read/archive state.
+| Option                  | Purpose                                                                                 |
+| ----------------------- | --------------------------------------------------------------------------------------- |
+| `loadContext`           | Load application-owned recipient context for filtering and creation hooks.              |
+| `onNotificationCreated` | Receive `{ notification, recipient, idempotencyKey }` after a successful insert.        |
+| `onReadStateChanged`    | Receive `{ notificationId, userId, readAt }` after a read/unread transition.            |
+| `onArchiveStateChanged` | Receive `{ notificationId, userId, archivedAt }` after an archive/unarchive transition. |
 
-## Development and release
+Hooks are awaited after successful writes. Duplicates and unchanged states skip them. A thrown hook leaves the write intact and reports `hook: 'failed'`; callback details are not exposed. Hooks have no automatic retry or guaranteed external delivery. Use your application's queue when durable email or other delivery is required.
 
-```sh
-bun install
-bun run check
-bun run deps:update
-```
+Reads do not replay input validators or defaults. `schemaStatus: 'legacy'` identifies removed kinds, missing required values, incompatible native field values, or failed output validation. Legacy fields are typed as `unknown`; notifications remain readable and manageable, and private fields remain excluded. `schemaStatus: 'current'` permits narrowing by `type`. It is not a claim that old records were rechecked against today's input refinements. Use `validator.output` for explicit read validation and migrate retained records when refining their contract. Failed output validation returns `null` for that field with legacy status.
 
-Tooling and repository settings follow [`liria24/nuxt-files-sdk` at `fb6242a7`](https://github.com/liria24/nuxt-files-sdk/tree/fb6242a7bebb54f850d57aa937b6bc07ef0d2b97): oxfmt/oxlint with typed linting, taze, tsdown, Vitest, Knip, Sherif, pinned Actions and a required `ci-ok` gate. Nuxt-specific build/test jobs are replaced with notification integration/client tests.
+Adding, renaming, or removing columns requires an application migration, including any data backfill. Existing records from the earlier JSON design need an explicit migration into the chosen native columns. A legacy record without a content fingerprint cannot safely deduplicate a new send and reports a conflict; use a new logical event key where appropriate.
 
-Tests cover real SQLite migrations, concurrent delivery across connections, restart deduplication, access control, partial batches, hooks, related-data projection, client identity races, Vue reactivity and React SSR. Consumer tests install the packed archive with Bun/npm/pnpm and compile and run its public APIs. CI exercises Linux/Windows and minimum/latest-supported Better Auth versions.
+Actions contain `id`, `label`, and optional root-relative or HTTP(S) `href`. The app owns action execution and authorization. Limits and URL validation are defined in [schema.ts](packages/better-notif/src/schema.ts). See [Contributing](CONTRIBUTING.md) for development, compatibility checks, and the release workflow.
 
-`uppt` creates release PRs. Publishing requires successful push CI for the tagged commit and verification of the exact release archive through `NOTIFICATION_TARBALL`; the test checks that its SHA-256 stays unchanged. Configure npm trusted publishing for this repository's `release.yml` workflow and `npm` environment before the first npm release. Package previews use pkg-pr-new; format/lint suggestions use autofix.ci.
+## License
+
+[MIT](LICENSE), Copyright (c) 2026 Liria.

@@ -3,11 +3,9 @@ import type { AuthContext } from '@better-auth/core'
 import type { DBAdapter, Where } from '@better-auth/core/db/adapter'
 import { APIError } from 'better-auth/api'
 
-import { contentSchema } from './schema'
-import type { NotificationContent } from './schema'
+import type { NotificationFields, NotificationKinds, NotificationModel } from './fields'
 import type {
     HookStatus,
-    Notification,
     NotificationOptions,
     RecipientAccount,
     RecipientContext,
@@ -18,25 +16,6 @@ import type {
     SendNotificationResult,
     StoredNotification,
 } from './types'
-
-export function publicNotification(value: StoredNotification): Notification {
-    const { idempotencyKey: _, ...notification } = value
-    return {
-        ...notification,
-        body: notification.body ?? null,
-        readAt: notification.readAt ?? null,
-        archivedAt: notification.archivedAt ?? null,
-    }
-}
-
-function canonical(value: NotificationContent) {
-    return JSON.stringify(value, (_key, item: unknown) => {
-        if (item && typeof item === 'object' && !Array.isArray(item)) {
-            return Object.fromEntries(Object.entries(item).toSorted(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))
-        }
-        return item
-    })
-}
 
 export async function runHook<T>(
     ctx: AuthContext,
@@ -148,18 +127,20 @@ async function recipientData(ctx: AuthContext, recipientId: string): Promise<Rec
 
 export interface SendInput<TContext> {
     recipients: string[] | 'all'
-    notification: NotificationContent
+    notification: Record<string, unknown>
+    contentHash: string
     idempotencyKey: string
     limit: number
     cursor?: string | undefined
     filter?: RecipientFilter<TContext> | undefined
 }
 
-export async function send<TContext>(
+export async function send<TContext, F extends NotificationFields, K extends NotificationKinds<F>>(
     ctx: AuthContext,
-    options: NotificationOptions<TContext>,
+    options: NotificationOptions<TContext, F, K>,
+    model: NotificationModel<F, K>,
     input: SendInput<TContext>,
-): Promise<SendNotificationResult> {
+): Promise<SendNotificationResult<F, K>> {
     const ids =
         input.recipients === 'all'
             ? (
@@ -175,11 +156,11 @@ export async function send<TContext>(
                   .toSorted()
                   .filter((id) => input.cursor === undefined || id > input.cursor)
                   .slice(0, input.limit + 1)
-    const results: RecipientResult[] = []
+    const results: RecipientResult<F, K>[] = []
     // ponytail: scan at most 100 candidates per call; use application jobs and ID batches for large audiences.
     for (const userId of ids.slice(0, input.limit)) {
         try {
-            results.push(await sendOne(ctx, options, input, userId))
+            results.push(await sendOne(ctx, options, model, input, userId))
         } catch (error) {
             const known = error instanceof APIError && error.body?.code?.startsWith('NOTIFICATION_')
             if (!known) ctx.logger.error('Notification recipient processing failed', { userId })
@@ -197,18 +178,19 @@ export async function send<TContext>(
     return { results, hasMore, nextCursor: hasMore ? ids[input.limit - 1]! : null }
 }
 
-async function sendOne<TContext>(
+async function sendOne<TContext, F extends NotificationFields, K extends NotificationKinds<F>>(
     ctx: AuthContext,
-    options: NotificationOptions<TContext>,
+    options: NotificationOptions<TContext, F, K>,
+    model: NotificationModel<F, K>,
     input: SendInput<TContext>,
     userId: string,
-): Promise<RecipientResult> {
+): Promise<RecipientResult<F, K>> {
     const where: Where[] = [
         { field: 'userId', value: userId },
         { field: 'idempotencyKey', value: input.idempotencyKey },
     ]
     const existing = await ctx.adapter.findOne<StoredNotification>({ model: 'notification', where })
-    if (existing) return duplicate(existing, input.notification)
+    if (existing) return duplicate(existing, input.contentHash, model)
 
     const data = await recipientData(ctx, userId)
     const recipient: RecipientContext<TContext> = { ...data, context: await options.loadContext?.(data) }
@@ -227,7 +209,8 @@ async function sendOne<TContext>(
         created = await ctx.adapter.create<StoredNotification>({
             model: 'notification',
             data: {
-                ...input.notification,
+                ...structuredClone(input.notification),
+                contentHash: input.contentHash,
                 userId,
                 idempotencyKey: input.idempotencyKey,
                 createdAt: new Date(),
@@ -238,10 +221,10 @@ async function sendOne<TContext>(
     } catch (error) {
         // A concurrent insert may have won the database UNIQUE constraint.
         const winner = await ctx.adapter.findOne<StoredNotification>({ model: 'notification', where })
-        if (winner) return duplicate(winner, input.notification)
+        if (winner) return duplicate(winner, input.contentHash, model)
         throw error
     }
-    const notification = publicNotification(created)
+    const notification = await model.present(created)
     const hook = await runHook(ctx, options.onNotificationCreated, {
         notification,
         recipient,
@@ -250,23 +233,35 @@ async function sendOne<TContext>(
     return { userId, status: 'created', notification, hook }
 }
 
-function duplicate(existing: StoredNotification, content: NotificationContent): RecipientResult {
-    if (canonical(contentSchema.parse(existing)) !== canonical(content)) {
+async function duplicate<F extends NotificationFields, K extends NotificationKinds<F>>(
+    existing: StoredNotification,
+    contentHash: string,
+    model: NotificationModel<F, K>,
+): Promise<RecipientResult<F, K>> {
+    if (existing.contentHash !== contentHash) {
         throw new APIError('CONFLICT', {
             code: 'NOTIFICATION_IDEMPOTENCY_CONFLICT',
-            message: 'This recipient and idempotency key already identify different content',
+            message:
+                'This recipient and key identify different content or a legacy record without a content fingerprint',
         })
     }
-    return { userId: existing.userId, status: 'duplicate', notification: publicNotification(existing), hook: 'skipped' }
+    return {
+        userId: existing.userId,
+        status: 'duplicate',
+        notification: await model.present(existing),
+        hook: 'skipped',
+    }
 }
 
-export async function setState<TContext>(
+export async function setState<TContext, F extends NotificationFields, K extends NotificationKinds<F>>(
     ctx: AuthContext,
-    options: NotificationOptions<TContext>,
+    options: NotificationOptions<TContext, F, K>,
+    model: NotificationModel<F, K>,
     userId: string,
     id: string,
     field: 'readAt' | 'archivedAt',
     value: boolean,
+    conditions: Where[] = [],
 ) {
     const where: Where[] = [
         { field: 'id', value: id },
@@ -275,7 +270,7 @@ export async function setState<TContext>(
     const timestamp = value ? new Date() : null
     const changed = await ctx.adapter.updateMany({
         model: 'notification',
-        where: [...where, { field, operator: value ? 'eq' : 'ne', value: null }],
+        where: [...where, ...conditions, { field, operator: value ? 'eq' : 'ne', value: null }],
         update: { [field]: timestamp },
     })
     const row = await ctx.adapter.findOne<StoredNotification>({ model: 'notification', where })
@@ -291,5 +286,5 @@ export async function setState<TContext>(
                       archivedAt: timestamp,
                   })
     }
-    return { notification: publicNotification(row), changed: changed > 0, hook }
+    return { notification: await model.present(row), changed: changed > 0, hook }
 }

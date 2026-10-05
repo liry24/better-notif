@@ -1,14 +1,22 @@
 import type { Account, Session, User } from 'better-auth'
 
-import type { NotificationContent } from './schema'
+import type { NotificationContent, NotificationFields, NotificationKinds, NotificationSchema } from './fields'
+import type { BaseContent } from './schema'
 
-export type Notification = NotificationContent & {
+interface NotificationRecord {
     id: string
     userId: string
     createdAt: Date
     readAt: Date | null
     archivedAt: Date | null
 }
+export type Notification<F extends NotificationFields = {}, K extends NotificationKinds<F> = {}> = NotificationRecord &
+    (
+        | (NotificationContent<F, K> & { schemaStatus: 'current' })
+        | (BaseContent & { schemaStatus: 'legacy' } & {
+              [N in keyof F as F[N]['returned'] extends false ? never : N]?: unknown
+          })
+    )
 
 export type RecipientAccount = Pick<
     Account,
@@ -48,10 +56,16 @@ export interface ArchiveStateEvent {
     archivedAt: Date | null
 }
 
-export interface NotificationOptions<TContext = undefined> {
+export interface NotificationOptions<
+    TContext = undefined,
+    F extends NotificationFields = {},
+    K extends NotificationKinds<F> = {},
+> {
+    schema?: NotificationSchema<F>
+    kinds?: K
     loadContext?: (recipient: RecipientData) => TContext | Promise<TContext>
     onNotificationCreated?: (event: {
-        notification: Notification
+        notification: Notification<NoInfer<F>, NoInfer<K>>
         recipient: RecipientContext<TContext>
         idempotencyKey: string
     }) => void | Promise<void>
@@ -59,21 +73,23 @@ export interface NotificationOptions<TContext = undefined> {
     onArchiveStateChanged?: (event: ArchiveStateEvent) => void | Promise<void>
 }
 
-export type RecipientResult =
-    | { userId: string; status: 'created' | 'duplicate'; notification: Notification; hook: HookStatus }
+export type RecipientResult<F extends NotificationFields = {}, K extends NotificationKinds<F> = {}> =
+    | { userId: string; status: 'created' | 'duplicate'; notification: Notification<F, K>; hook: HookStatus }
     | { userId: string; status: 'skipped' }
     | { userId: string; status: 'failed'; error: { code: string; message: string } }
 
-export interface SendNotificationResult {
-    results: RecipientResult[]
+export interface SendNotificationResult<F extends NotificationFields = {}, K extends NotificationKinds<F> = {}> {
+    results: RecipientResult<F, K>[]
     nextCursor: string | null
     hasMore: boolean
 }
 
-export interface NotificationList {
-    notifications: Notification[]
+export interface NotificationList<F extends NotificationFields = {}, K extends NotificationKinds<F> = {}> {
+    notifications: Notification<F, K>[]
     total: number
     nextOffset: number | null
 }
 
-export type StoredNotification = Notification & { idempotencyKey: string }
+export type StoredNotification = BaseContent &
+    NotificationRecord &
+    Record<string, unknown> & { idempotencyKey: string; contentHash?: string | null }

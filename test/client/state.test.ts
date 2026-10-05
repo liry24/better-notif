@@ -4,11 +4,11 @@ import { createAuthClient as createReactClient } from 'better-auth/react'
 import { createAuthClient as createVueClient } from 'better-auth/vue'
 import { createElement } from 'react'
 import { renderToString } from 'react-dom/server'
-import { afterEach, beforeEach, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, expect, it, vi } from 'vite-plus/test'
 import { effectScope } from 'vue'
 
-import { notificationClient } from '../../packages/better-auth-notification/src/client'
-import type { NotificationList } from '../../packages/better-auth-notification/src/client'
+import { notificationClient } from '../../packages/better-notif/src/client'
+import type { NotificationList } from '../../packages/better-notif/src/client'
 import { content, setup } from '../utils'
 
 const cleanups: (() => void)[] = []
@@ -113,14 +113,50 @@ it('shares list/count state, refreshes after mutations, exposes errors, and clea
     await vi.waitFor(() => expect(list.get().error?.status).toBe(401))
 })
 
+it('refreshes shared state after batch updates and deletion', async () => {
+    const { app, user, client, list, count } = await clientFixture()
+    for (const key of ['one', 'two'])
+        await app.auth.api.sendNotification({
+            body: { recipients: [user.id], idempotencyKey: key, notification: content },
+        })
+    cleanups.push(
+        list.subscribe(() => {}),
+        count.subscribe(() => {}),
+    )
+    await vi.waitFor(() => expect(list.get().data?.notifications).toHaveLength(2))
+    await vi.waitFor(() => expect(count.get().data?.count).toBe(2))
+    const ids = list.get().data!.notifications.map((row) => row.id)
+    expect((await client.notification.setReadMany({ ids, read: true })).error).toBeNull()
+    await vi.waitFor(() => expect(count.get().data?.count).toBe(0))
+    expect((await client.notification.setReadMany({ ids, read: false })).error).toBeNull()
+    await vi.waitFor(() => expect(count.get().data?.count).toBe(2))
+    expect((await client.notification.setArchivedMany({ ids, archived: true })).error).toBeNull()
+    await vi.waitFor(() => expect(list.get().data?.notifications).toHaveLength(0))
+    await vi.waitFor(() => expect(count.get().data?.count).toBe(0))
+    await client.notification.refetch({ archived: 'all' })
+    expect(list.get().data?.notifications).toHaveLength(2)
+    expect((await client.notification.delete({ id: ids[0]! })).data).toEqual({ deleted: true })
+    await vi.waitFor(() => expect(list.get().data?.notifications).toHaveLength(1))
+    expect((await client.notification.deleteMany({ ids })).error).toBeNull()
+    await vi.waitFor(() => expect(list.get().data?.notifications).toHaveLength(0))
+})
+
 it('does not let a response from the previous user repopulate shared state', async () => {
     const { app, user, client, list, hold, switchTo } = await clientFixture()
     const second = await app.user()
     await app.auth.api.sendNotification({
-        body: { recipients: [user.id], idempotencyKey: 'first', notification: { ...content, title: 'First user' } },
+        body: {
+            recipients: [user.id],
+            idempotencyKey: 'first',
+            notification: { ...content, title: 'First user' },
+        },
     })
     await app.auth.api.sendNotification({
-        body: { recipients: [second.id], idempotencyKey: 'second', notification: { ...content, title: 'Second user' } },
+        body: {
+            recipients: [second.id],
+            idempotencyKey: 'second',
+            notification: { ...content, title: 'Second user' },
+        },
     })
     cleanups.push(list.subscribe(() => {}))
     await vi.waitFor(() => expect(list.get().data?.notifications[0]?.title).toBe('First user'))

@@ -6,10 +6,10 @@ import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { expect, it } from 'vitest'
+import { expect, it } from 'vite-plus/test'
 
 const root = fileURLToPath(new URL('../../', import.meta.url))
-const packageDirectory = join(root, 'packages/better-auth-notification')
+const packageDirectory = join(root, 'packages/better-notif')
 
 function run(program: string, args: string[], cwd: string) {
     try {
@@ -19,6 +19,9 @@ function run(program: string, args: string[], cwd: string) {
                 [join(dirname(process.execPath), 'node_modules/npm/bin/npm-cli.js'), ...args],
                 { cwd, encoding: 'utf8', stdio: 'pipe' },
             )
+        }
+        if (process.platform === 'win32' && program === 'pnpm') {
+            return run('npm', ['exec', '--yes', '--package=pnpm@10.25.0', '--', 'pnpm', ...args], cwd)
         }
         return execFileSync(program, args, { cwd, encoding: 'utf8', stdio: 'pipe' })
     } catch (error) {
@@ -34,7 +37,7 @@ it('installs and exercises the actual tarball in an isolated consumer', async ()
     try {
         let tarball = process.env.NOTIFICATION_TARBALL
         if (!tarball) {
-            run('bun', ['run', 'build'], root)
+            run(process.execPath, [join(root, 'node_modules/vite-plus/dist/bin.js'), 'run', 'build'], root)
             const packDirectory = join(directory, 'pack')
             await mkdir(packDirectory)
             run('bun', ['pm', 'pack', '--destination', packDirectory, '--ignore-scripts'], packageDirectory)
@@ -49,6 +52,14 @@ it('installs and exercises the actual tarball in an isolated consumer', async ()
         expect(
             entries.every((entry) => /^package\/(?:dist(?:\/.*)?|package.json|README.md|LICENSE)$/u.test(entry)),
         ).toBe(true)
+        expect(entries).toContain('package/LICENSE')
+        expect(run('tar', ['-xOf', tarball, 'package/LICENSE'], directory)).toBe(
+            await readFile(join(root, 'LICENSE'), 'utf8'),
+        )
+        const packedManifest = JSON.parse(run('tar', ['-xOf', tarball, 'package/package.json'], directory)) as {
+            license?: string
+        }
+        expect(packedManifest.license).toBe('MIT')
         await copyFile(tarball, join(directory, 'package.tgz'))
         const version = process.env.NOTIFICATION_BETTER_AUTH_VERSION ?? '1.7.7'
         const manager = process.env.NOTIFICATION_PACKAGE_MANAGER ?? 'bun'
@@ -60,11 +71,13 @@ it('installs and exercises the actual tarball in an isolated consumer', async ()
                 private: true,
                 type: 'module',
                 dependencies: {
-                    'better-auth-notification': 'file:./package.tgz',
+                    'better-notif': 'file:./package.tgz',
                     'better-auth': version,
                     '@better-auth/core': version,
+                    zod: '^4.5.4',
+                    valibot: '^1.5.0',
                 },
-                devDependencies: { typescript: '^7.0.2', '@types/node': '^26.6.3' },
+                devDependencies: { typescript: '^7.0.2', '@types/node': '^26.6.3', auth: '1.7.7' },
             }),
         )
         run(manager, ['install', '--ignore-scripts'], directory)
@@ -79,6 +92,7 @@ it('installs and exercises the actual tarball in an isolated consumer', async ()
                     strict: true,
                     skipLibCheck: true,
                     noEmit: true,
+                    allowImportingTsExtensions: true,
                 },
                 include: ['consumer.ts', 'client.ts'],
             }),
@@ -89,28 +103,66 @@ it('installs and exercises the actual tarball in an isolated consumer', async ()
 import { DatabaseSync } from 'node:sqlite'
 import { betterAuth } from 'better-auth'
 import { getMigrations } from 'better-auth/db/migration'
-import { notification } from 'better-auth-notification'
+import { notification } from 'better-notif'
+import * as z from 'zod'
+import * as v from 'valibot'
+const additionalFields = {
+  amount: { type: 'number', required: false, validator: { input: z.string().transform(Number) } },
+  slug: { type: 'string', required: false, validator: { input: v.pipe(v.string(), v.trim()) } },
+} as const
+const kinds = { invoice: { required: ['amount'] }, post: { required: ['slug'] } } as const
 const database = new DatabaseSync(':memory:')
-const auth = betterAuth({ database, baseURL: 'http://localhost:3000', secret: 'packed-consumer-secret-more-than-thirty-two-characters', emailAndPassword: { enabled: true }, plugins: [notification()], logger: { disabled: true } })
+export const auth = betterAuth({ database, baseURL: 'http://localhost:3000', secret: 'packed-consumer-secret-more-than-thirty-two-characters', emailAndPassword: { enabled: true }, plugins: [notification({ schema: { notification: { additionalFields } }, kinds, onNotificationCreated: ({ notification: item }) => { if (item.schemaStatus === 'current' && item.type === 'invoice') { const amount: number = item.amount; assert.equal(amount, 42) } } })], logger: { disabled: true } })
 await (await getMigrations(auth.options)).runMigrations()
 const registered = await auth.api.signUpEmail({ body: { name: 'Consumer', email: 'consumer@example.com', password: 'a-long-consumer-password' }, asResponse: true })
 assert.equal(registered.status, 200)
 const signup = await registered.json() as { user: { id: string } }
-const body = { recipients: [signup.user.id], notification: { type: 'test', title: 'Packed' }, idempotencyKey: 'packed' }
+const body = { recipients: [signup.user.id], notification: { type: 'invoice' as const, title: 'Packed', amount: '42' }, idempotencyKey: 'packed' }
 assert.equal((await auth.api.sendNotification({ body })).results[0]?.status, 'created')
 assert.equal((await auth.api.sendNotification({ body })).results[0]?.status, 'duplicate')
 const cookie = registered.headers.getSetCookie().map((value) => value.split(';')[0]).join('; ')
 const response = await auth.handler(new Request('http://localhost:3000/api/auth/notification/list', { headers: { cookie } }))
 assert.equal(response.status, 200)
-assert.equal((await response.json()).notifications[0].title, 'Packed')
+assert.equal((await response.json()).notifications[0].amount, 42)
+const page = await auth.api.listUserNotifications({ query: { userIds: [signup.user.id] } })
+const item = page.notifications[0]!
+if (item.schemaStatus === 'current' && item.type === 'invoice') { const amount: number = item.amount; assert.equal(amount, 42) }
+await assert.rejects(auth.api.sendNotification({ body: { ...body, idempotencyKey: 'bad', notification: { type: 'post', title: 'Bad', slug: 123 } } } as any))
+const post = await auth.api.sendNotification({ body: { ...body, idempotencyKey: 'post', notification: { type: 'post', title: 'Post', slug: ' hello ' } } })
+assert.equal(post.results[0]?.status, 'created')
+if (post.results[0]?.status === 'created' && post.results[0].notification.schemaStatus === 'current' && post.results[0].notification.type === 'post') assert.equal(post.results[0].notification.slug, 'hello')
+const removed = await auth.api.deleteUserNotifications({ body: { userIds: [signup.user.id] } })
+assert.equal(removed.results.length, 2)
+assert(removed.results.every((result) => result.status === 'deleted'))
+if (false) {
+  // @ts-expect-error Writes consume schema input, not transformed output.
+  await auth.api.sendNotification({ body: { ...body, notification: { type: 'invoice', title: 'Bad', amount: 42 } } })
+  // @ts-expect-error Notification kinds are closed when schemas are configured.
+  await auth.api.sendNotification({ body: { ...body, notification: { type: 'unknown', title: 'Bad' } } })
+}
 database.close()
 `,
         )
         await writeFile(
             join(directory, 'client.ts'),
             `import { createAuthClient } from 'better-auth/client'
-import { notificationClient } from 'better-auth-notification/client'
-export const client = createAuthClient({ plugins: [notificationClient()] })
+import { notificationClient } from 'better-notif/client'
+import type { auth } from './consumer.ts'
+export const client = createAuthClient({ plugins: [notificationClient<typeof auth>()] })
+void client.notification.list({ query: {} }).then(({ data }) => {
+  const item = data?.notifications[0]
+  if (item?.schemaStatus === 'current' && item.type === 'invoice') {
+    const amount: number = item.amount
+    // @ts-expect-error Reads expose the transformed schema output.
+    const input: string = item.amount
+    void amount; void input
+  }
+})
+const state = client.useNotifications.get().data?.notifications[0]
+if (state?.schemaStatus === 'current' && state.type === 'post') { const slug: string = state.slug; void slug }
+void client.notification.deleteMany({ ids: ['one'] })
+// @ts-expect-error Trusted target APIs are not client endpoints.
+void client.listUserNotifications({ query: { userIds: 'all' } })
 void client.notification.list({ query: { limit: 20 } })
 void client.notification.setRead({ id: 'one', read: true })
 void client.notification.refetch()
@@ -118,8 +170,44 @@ void client.notification.refetch()
 void client.sendNotification({})
 `,
         )
-        run('bun', ['x', '--no-install', 'tsc', '--noEmit'], directory)
-        run(process.execPath, ['consumer.ts'], directory)
+        run(process.execPath, [join(directory, 'node_modules/typescript/bin/tsc'), '--noEmit'], directory)
+        const runtimeVersion = process.env.NOTIFICATION_NODE_VERSION
+        if (runtimeVersion) {
+            assert(/^\d+\.\d+\.\d+$/u.test(runtimeVersion), 'Consumer Node version must be exact')
+            run('npm', ['exec', '--yes', '--package=node@' + runtimeVersion, '--', 'node', 'consumer.ts'], directory)
+        } else {
+            run(process.execPath, ['consumer.ts'], directory)
+        }
+        await writeFile(
+            join(directory, 'auth.ts'),
+            `import { betterAuth } from 'better-auth'
+import { notification } from 'better-notif'
+export const auth = betterAuth({ plugins: [notification({ schema: { notification: { additionalFields: {
+    postId: { type: 'string', required: false }, score: { type: 'number', required: true },
+} } }, kinds: { post: { required: ['postId'] } } })] })
+`,
+        )
+        run(
+            process.execPath,
+            [
+                join(directory, 'node_modules/auth/dist/index.mjs'),
+                'generate',
+                '--config',
+                './auth.ts',
+                '--adapter',
+                'drizzle',
+                '--dialect',
+                'sqlite',
+                '--output',
+                './generated-schema.ts',
+                '--yes',
+            ],
+            directory,
+        )
+        const generated = await readFile(join(directory, 'generated-schema.ts'), 'utf8')
+        expect(generated).toMatch(/postId:\s*text\(["']post_id["']\)/u)
+        expect(generated).toMatch(/score:\s*(?:integer|real|numeric)\(["']score["']\)\.notNull\(\)/u)
+        expect(generated).not.toMatch(/postId:[^\n]*notNull/u)
         run('bun', ['build', 'client.ts', '--target', 'browser', '--outdir', 'bundle'], directory)
         const bundle = await readFile(join(directory, 'bundle/client.js'), 'utf8')
         expect(bundle).not.toMatch(/createAuthEndpoint|Notification hook failed|node:sqlite/u)

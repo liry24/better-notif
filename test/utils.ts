@@ -3,10 +3,14 @@ import { DatabaseSync } from 'node:sqlite'
 import { betterAuth } from 'better-auth'
 import { getMigrations } from 'better-auth/db/migration'
 
-import { notification } from '../packages/better-auth-notification/src/index'
-import type { NotificationOptions } from '../packages/better-auth-notification/src/index'
+import { notification } from '../packages/better-notif/src/index'
+import type { NotificationOptions, NotificationFields, NotificationKinds } from '../packages/better-notif/src/index'
 
-export async function setup<TContext = undefined>(options: NotificationOptions<TContext> = {}, filename = ':memory:') {
+export async function setup<
+    TContext = undefined,
+    const F extends NotificationFields = {},
+    const K extends NotificationKinds<F> = {},
+>(options: NotificationOptions<TContext, F, K> = {}, filename = ':memory:') {
     const database = new DatabaseSync(filename)
     database.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;')
     const auth = betterAuth({

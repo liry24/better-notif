@@ -26,7 +26,6 @@ export const contentSchema = z.object({
     type: z.string().min(1).max(100),
     title: z.string().min(1).max(500),
     body: z.string().max(10_000).nullable().default(null),
-    data: z.record(z.string(), z.json()).default({}),
     actions: z
         .array(actionSchema)
         .max(10)
@@ -52,7 +51,7 @@ export const schema = {
             type: { type: 'string', required: true },
             title: { type: 'string', required: true },
             body: { type: 'string', required: false },
-            data: { type: 'json', required: true },
+            contentHash: { type: 'string', required: false, returned: false },
             actions: { type: 'json', required: true },
             createdAt: { type: 'date', required: true },
             readAt: { type: 'date', required: false },
@@ -63,6 +62,6 @@ export const schema = {
 } satisfies BetterAuthPluginDBSchema
 
 export type NotificationAction = z.infer<typeof actionSchema>
-export type NotificationInput = z.input<typeof contentSchema>
-export type NotificationContent = z.output<typeof contentSchema>
+export type BaseInput = z.input<typeof contentSchema>
+export type BaseContent = z.output<typeof contentSchema>
 export type NotificationListQuery = z.input<typeof listQuerySchema>

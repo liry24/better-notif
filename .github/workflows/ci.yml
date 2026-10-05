@@ -20,7 +20,7 @@ jobs:
             - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
               with: { persist-credentials: false }
             - uses: ./.github/actions/setup
-            - run: bun run build
+            - run: vp run build
     typecheck:
         permissions: { contents: read }
         runs-on: ubuntu-latest
@@ -28,7 +28,7 @@ jobs:
             - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
               with: { persist-credentials: false }
             - uses: ./.github/actions/setup
-            - run: bun run typecheck
+            - run: vp run typecheck
     lint:
         permissions: { contents: read }
         runs-on: ubuntu-latest
@@ -36,9 +36,9 @@ jobs:
             - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
               with: { persist-credentials: false }
             - uses: ./.github/actions/setup
-            - run: bun run format:check
-            - run: bun run lint
-            - run: bun run workspace:check
+            - run: vp run format:check
+            - run: vp run lint
+            - run: vp run workspace:check
     knip:
         permissions: { contents: read }
         runs-on: ubuntu-latest
@@ -46,7 +46,7 @@ jobs:
             - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
               with: { persist-credentials: false }
             - uses: ./.github/actions/setup
-            - run: bun run unused
+            - run: vp run unused
     unit:
         permissions: { contents: read }
         runs-on: ubuntu-latest
@@ -54,7 +54,7 @@ jobs:
             - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
               with: { persist-credentials: false }
             - uses: ./.github/actions/setup
-            - run: bun run test:unit
+            - run: vp run test:unit
     integration:
         permissions: { contents: read }
         strategy:
@@ -65,7 +65,7 @@ jobs:
             - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
               with: { persist-credentials: false }
             - uses: ./.github/actions/setup
-            - run: bun run test:integration
+            - run: vp run test:integration
     client:
         permissions: { contents: read }
         strategy:
@@ -76,7 +76,7 @@ jobs:
             - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
               with: { persist-credentials: false }
             - uses: ./.github/actions/setup
-            - run: bun run test:client
+            - run: vp run test:client
     consumer:
         permissions: { contents: read }
         needs: build
@@ -84,13 +84,14 @@ jobs:
             fail-fast: false
             matrix:
                 include:
-                    - { package-manager: bun, better-auth: '1.7.7' }
+                    - { package-manager: bun, better-auth: '1.7.7', runtime-node: '24.0.0' }
                     - { package-manager: bun, better-auth: '>=1.7.7 <1.8.0' }
                     - { package-manager: npm, better-auth: '>=1.7.7 <1.8.0' }
                     - { package-manager: pnpm, better-auth: '>=1.7.7 <1.8.0' }
         env:
             NOTIFICATION_PACKAGE_MANAGER: ${{ matrix.package-manager }}
             NOTIFICATION_BETTER_AUTH_VERSION: ${{ matrix.better-auth }}
+            NOTIFICATION_NODE_VERSION: ${{ matrix.runtime-node }}
         runs-on: ubuntu-latest
         steps:
             - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -98,7 +99,7 @@ jobs:
             - uses: ./.github/actions/setup
             - if: matrix.package-manager == 'pnpm'
               run: npm install --global pnpm@10.25.0
-            - run: bun run test:consumer
+            - run: vp run test:consumer
     ci-ok:
         if: always()
         needs: [build, typecheck, lint, knip, unit, integration, client, consumer]

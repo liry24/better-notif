@@ -14,7 +14,7 @@ jobs:
         steps:
             - uses: danielroe/uppt/pr@65a86313a63b10a6793de6c4ff8614b18e127a71 # v0.6.10
               with:
-                  packages: packages/better-auth-notification
+                  packages: packages/better-notif
                   token: ${{ secrets.GITHUB_TOKEN }}
             - name: Find the stable release PR
               id: release-pr
@@ -29,9 +29,9 @@ jobs:
               with:
                   fetch-depth: 0
                   ref: ${{ steps.release-pr.outputs.branch }}
-            - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+            - uses: voidzero-dev/setup-vp@3754dd7dbdb32bd8f6d28b6043de13ad3a75f21f # v1.21.1
               if: steps.release-pr.outputs.branch != ''
-              with: { bun-version-file: package.json }
+              with: { version-file: package.json, node-version: 24.21.0, run-install: false }
             - name: Sync the release branch
               if: steps.release-pr.outputs.branch != ''
               env:
@@ -45,7 +45,7 @@ jobs:
                     git checkout --theirs -- bun.lock
                     git add bun.lock
                   fi
-                  bun install --lockfile-only --ignore-scripts
+                  vp install --lockfile-only --ignore-scripts
                   git add bun.lock
                   if git rev-parse -q --verify MERGE_HEAD >/dev/null || ! git diff --cached --quiet; then
                     git commit -m 'chore: sync release branch with main'
@@ -60,7 +60,7 @@ jobs:
         steps:
             - uses: danielroe/uppt/release@65a86313a63b10a6793de6c4ff8614b18e127a71 # v0.6.10
               with:
-                  packages: packages/better-auth-notification
+                  packages: packages/better-notif
                   token: ${{ secrets.GITHUB_TOKEN }}
     pack:
         if: github.event_name == 'workflow_dispatch' && startsWith(github.ref,
@@ -85,23 +85,21 @@ jobs:
                   [[ -n "$run_id" && "$run_id" != null ]]
                   gh run watch "$run_id" --exit-status
                   gh run view "$run_id" --json jobs --jq '.jobs[] | select(.name == "ci-ok") | .conclusion' | grep -qx success
-            - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-              with: { node-version: 24 }
-            - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
-              with: { bun-version-file: package.json }
-            - run: bun ci --ignore-scripts
+            - uses: voidzero-dev/setup-vp@3754dd7dbdb32bd8f6d28b6043de13ad3a75f21f # v1.21.1
+              with: { version-file: package.json, node-version: 24.21.0, run-install: false }
+            - run: vp install --frozen-lockfile --ignore-scripts
             - id: pack
               uses: danielroe/uppt/pack@65a86313a63b10a6793de6c4ff8614b18e127a71 # v0.6.10
               with:
                   checkout: false
                   install: false
-                  packages: packages/better-auth-notification
+                  packages: packages/better-notif
             - name: Verify the exact release artifact
               env:
                   PACKED_FILES: ${{ steps.pack.outputs.files }}
               run: |
                   tarball=$(jq -er 'if length == 1 then .[0] else error("Expected one release tarball") end' <<< "$PACKED_FILES")
-                  NOTIFICATION_TARBALL="$RUNNER_TEMP/uppt-pack/$tarball" bun run test:consumer
+                  NOTIFICATION_TARBALL="$RUNNER_TEMP/uppt-pack/$tarball" vp run test:consumer
     publish:
         if: github.event_name == 'workflow_dispatch' && startsWith(github.ref,
             'refs/tags/v') && needs.pack.outputs.files != '[]'

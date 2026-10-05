@@ -1,6 +1,6 @@
-import { afterEach, expect, it, vi } from 'vitest'
+import { afterEach, expect, it, vi } from 'vite-plus/test'
 
-import type { RecipientData, RecipientFilter } from '../../packages/better-auth-notification/src/index'
+import type { RecipientData, RecipientFilter } from '../../packages/better-notif/src/index'
 import { content, setup } from '../utils'
 
 const cleanups: (() => void)[] = []
@@ -26,7 +26,13 @@ it('bounds scanning, continues through empty matches, and evaluates live user da
         expect(sessions).toEqual([])
         return context?.allowed === true
     })
-    const body = { recipients: 'all' as const, idempotencyKey: 'campaign', notification: content, limit: 2, filter }
+    const body = {
+        recipients: 'all' as const,
+        idempotencyKey: 'campaign',
+        notification: content,
+        limit: 2,
+        filter,
+    }
     const first = await app.auth.api.sendNotification({ body })
     expect(first.results.map((result) => result.userId)).toEqual(ids.slice(0, 2))
     expect(first.results.every((result) => result.status === 'skipped')).toBe(true)
@@ -34,10 +40,18 @@ it('bounds scanning, continues through empty matches, and evaluates live user da
     expect(first.hasMore).toBe(true)
     expect(filter).toHaveBeenCalledTimes(2)
 
-    await app.ctx.adapter.update({ model: 'user', where: [{ field: 'id', value: ids[2]! }], update: { plan: 'pro' } })
-    const second = await app.auth.api.sendNotification({ body: { ...body, cursor: first.nextCursor! } })
+    await app.ctx.adapter.update({
+        model: 'user',
+        where: [{ field: 'id', value: ids[2]! }],
+        update: { plan: 'pro' },
+    })
+    const second = await app.auth.api.sendNotification({
+        body: { ...body, cursor: first.nextCursor! },
+    })
     expect(second.results.map((result) => result.status)).toEqual(['created', 'skipped'])
-    const last = await app.auth.api.sendNotification({ body: { ...body, cursor: second.nextCursor! } })
+    const last = await app.auth.api.sendNotification({
+        body: { ...body, cursor: second.nextCursor! },
+    })
     expect(last.results).toHaveLength(1)
     expect(last).toMatchObject({ nextCursor: null, hasMore: false })
     expect(filter).toHaveBeenCalledTimes(5)
@@ -60,7 +74,11 @@ it('returns partial failures and supports explicit-ID retries with the same key'
         { name: 'failure', email: 'bad@example.com' },
         { method: 'email-password' },
     )
-    const body = { recipients: [good.id, bad.id, good.id, 'missing'], notification: content, idempotencyKey: 'retry' }
+    const body = {
+        recipients: [good.id, bad.id, good.id, 'missing'],
+        notification: content,
+        idempotencyKey: 'retry',
+    }
     const sent = await app.auth.api.sendNotification({ body })
     expect(sent.results).toHaveLength(3)
     expect(sent.results.find((result) => result.userId === good.id)?.status).toBe('created')
@@ -139,12 +157,16 @@ it('paginates explicit recipients and notifications and filters unread archived 
     const ids = [user.id, other.id].toSorted()
     const body = { recipients: ids, idempotencyKey: 'paged', notification: content, limit: 1 }
     const first = await app.auth.api.sendNotification({ body })
-    const second = await app.auth.api.sendNotification({ body: { ...body, cursor: first.nextCursor! } })
+    const second = await app.auth.api.sendNotification({
+        body: { ...body, cursor: first.nextCursor! },
+    })
     expect(first.results[0]?.userId).toBe(ids[0])
     expect(second.results[0]?.userId).toBe(ids[1])
     expect(second.hasMore).toBe(false)
     for (let i = 0; i < 3; i++)
-        await app.auth.api.sendNotification({ body: { ...body, recipients: [user.id], idempotencyKey: `page${i}` } })
+        await app.auth.api.sendNotification({
+            body: { ...body, recipients: [user.id], idempotencyKey: `page${i}` },
+        })
     const page = await app.auth.api.listNotifications({ headers: user.headers, query: { limit: 2 } })
     expect(page).toMatchObject({ total: 4, nextOffset: 2 })
     const next = await app.auth.api.listNotifications({
@@ -154,7 +176,10 @@ it('paginates explicit recipients and notifications and filters unread archived 
     expect(next.nextOffset).toBeNull()
     expect(new Set([...page.notifications, ...next.notifications].map((item) => item.id)).size).toBe(4)
     const id = page.notifications[0]!.id
-    await app.auth.api.setNotificationArchived({ headers: user.headers, body: { id, archived: true } })
+    await app.auth.api.setNotificationArchived({
+        headers: user.headers,
+        body: { id, archived: true },
+    })
     expect(
         (
             await app.auth.api.listNotifications({
@@ -164,7 +189,11 @@ it('paginates explicit recipients and notifications and filters unread archived 
         ).total,
     ).toBe(1)
     expect(
-        (await app.auth.api.listNotifications({ headers: user.headers, query: { archived: 'all', read: 'read' } }))
-            .total,
+        (
+            await app.auth.api.listNotifications({
+                headers: user.headers,
+                query: { archived: 'all', read: 'read' },
+            })
+        ).total,
     ).toBe(0)
 })

@@ -1,22 +1,38 @@
 import type { BetterFetchOption } from '@better-fetch/fetch'
 /* oxlint-disable typescript/no-unsafe-type-assertion -- Better Auth inference markers and its untyped client store require narrowing. */
-import type { BetterAuthClientPlugin } from 'better-auth'
+import type { BetterAuthClientPlugin, BetterAuthOptions } from 'better-auth'
 import { useAuthQuery } from 'better-auth/client'
 import type { AuthQueryAtom, AuthQueryState } from 'better-auth/client'
 import { atom, onMount } from 'nanostores'
 import type { WritableAtom } from 'nanostores'
 
+import type { NotificationFields, NotificationKinds } from './fields'
 import type { notification } from './index'
 import type { NotificationListQuery } from './schema'
 import type { NotificationList } from './types'
 
-export type { NotificationAction, NotificationInput, NotificationListQuery } from './schema'
+export type { NotificationAction, NotificationListQuery } from './schema'
+export type { NotificationInput, NotificationFields, NotificationKinds } from './fields'
 export type { HookStatus, Notification, NotificationList } from './types'
 
-export function notificationClient() {
+type DefaultAuth = { options: { plugins: [ReturnType<typeof notification<undefined, {}, {}>>] } }
+type ServerPlugin<A extends { options: BetterAuthOptions }> = Extract<
+    NonNullable<A['options']['plugins']>[number],
+    { id: 'notification' }
+>
+type FieldsOf<A extends { options: BetterAuthOptions }> =
+    ServerPlugin<A> extends {
+        options: { schema?: { notification?: { additionalFields?: infer F extends NotificationFields } } }
+    }
+        ? F
+        : {}
+type KindsOf<A extends { options: BetterAuthOptions }> =
+    ServerPlugin<A> extends { options: { kinds?: infer K extends NotificationKinds<FieldsOf<A>> } } ? K : {}
+
+export function notificationClient<A extends { options: BetterAuthOptions } = DefaultAuth>() {
     return {
         id: 'notification',
-        $InferServerPlugin: {} as ReturnType<typeof notification>,
+        $InferServerPlugin: {} as ServerPlugin<A>,
         getAtoms($fetch) {
             const signal = atom(false)
             const epoch = atom(0)
@@ -38,10 +54,15 @@ export function notificationClient() {
                 $notificationSignal: signal,
                 $notificationEpoch: epoch,
                 $notificationQuery: query,
-                notifications: useAuthQuery<NotificationList>(signal, '/notification/list', scopedFetch, () => ({
-                    method: 'GET',
-                    query: query.get(),
-                })),
+                notifications: useAuthQuery<NotificationList<FieldsOf<A>, KindsOf<A>>>(
+                    signal,
+                    '/notification/list',
+                    scopedFetch,
+                    () => ({
+                        method: 'GET',
+                        query: query.get(),
+                    }),
+                ),
                 unreadNotificationCount: useAuthQuery<{ count: number }>(
                     signal,
                     '/notification/unread-count',
@@ -51,7 +72,7 @@ export function notificationClient() {
             }
         },
         getActions(_$fetch, store) {
-            const list = store.atoms.notifications as AuthQueryAtom<NotificationList>
+            const list = store.atoms.notifications as AuthQueryAtom<NotificationList<FieldsOf<A>, KindsOf<A>>>
             const count = store.atoms.unreadNotificationCount as AuthQueryAtom<{ count: number }>
             const epoch = store.atoms.$notificationEpoch as WritableAtom<number>
             const query = store.atoms.$notificationQuery as WritableAtom<NotificationListQuery>
@@ -90,7 +111,15 @@ export function notificationClient() {
         },
         atomListeners: [
             {
-                matcher: (path) => path === '/notification/set-read' || path === '/notification/set-archived',
+                matcher: (path) =>
+                    [
+                        '/notification/set-read',
+                        '/notification/set-archived',
+                        '/notification/set-read-many',
+                        '/notification/set-archived-many',
+                        '/notification/delete',
+                        '/notification/delete-many',
+                    ].includes(path),
                 signal: '$notificationSignal',
             },
         ],

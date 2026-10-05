@@ -1,6 +1,6 @@
-import { expect, it } from 'vitest'
+import { expect, it } from 'vite-plus/test'
 
-import { contentSchema, listQuerySchema } from '../../packages/better-auth-notification/src/schema'
+import { contentSchema, listQuerySchema } from '../../packages/better-notif/src/schema'
 
 it('accepts navigable actions and rejects dangerous or ambiguous links', () => {
     for (const href of [
@@ -10,8 +10,11 @@ it('accepts navigable actions and rejects dangerous or ambiguous links', () => {
         'http://localhost:3000',
     ]) {
         expect(
-            contentSchema.safeParse({ type: 'test', title: 'Test', actions: [{ id: 'open', label: 'Open', href }] })
-                .success,
+            contentSchema.safeParse({
+                type: 'test',
+                title: 'Test',
+                actions: [{ id: 'open', label: 'Open', href }],
+            }).success,
         ).toBe(true)
     }
     for (const href of [
@@ -25,19 +28,24 @@ it('accepts navigable actions and rejects dangerous or ambiguous links', () => {
         'https:example.com',
     ]) {
         expect(
-            contentSchema.safeParse({ type: 'test', title: 'Test', actions: [{ id: 'open', label: 'Open', href }] })
-                .success,
+            contentSchema.safeParse({
+                type: 'test',
+                title: 'Test',
+                actions: [{ id: 'open', label: 'Open', href }],
+            }).success,
         ).toBe(false)
     }
     expect(
-        contentSchema.parse({ type: 'test', title: 'Test', actions: [{ id: 'modal', label: 'Change payment method' }] })
-            .actions,
+        contentSchema.parse({
+            type: 'test',
+            title: 'Test',
+            actions: [{ id: 'modal', label: 'Change payment method' }],
+        }).actions,
     ).toHaveLength(1)
 })
 
 it('validates content and query bounds without silently accepting duplicate actions', () => {
     expect(contentSchema.safeParse({ type: 'test', title: '' }).success).toBe(false)
-    expect(contentSchema.safeParse({ type: 'test', title: 'Test', data: { bad: Number.NaN } }).success).toBe(false)
     expect(
         contentSchema.safeParse({
             type: 'test',
@@ -50,5 +58,10 @@ it('validates content and query bounds without silently accepting duplicate acti
     ).toBe(false)
     expect(listQuerySchema.safeParse({ limit: 101 }).success).toBe(false)
     expect(listQuerySchema.safeParse({ offset: -1 }).success).toBe(false)
-    expect(listQuerySchema.parse({})).toEqual({ limit: 20, offset: 0, read: 'all', archived: 'unarchived' })
+    expect(listQuerySchema.parse({})).toEqual({
+        limit: 20,
+        offset: 0,
+        read: 'all',
+        archived: 'unarchived',
+    })
 })
