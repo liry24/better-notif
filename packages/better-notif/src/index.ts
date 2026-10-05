@@ -2,8 +2,8 @@ import type { BetterAuthPlugin } from 'better-auth'
 import { createAuthEndpoint, sessionMiddleware } from 'better-auth/api'
 import * as z from 'zod'
 
+import { before, after, listScope, serverActor } from './lifecycle'
 import {
-    deleteNotification,
     listUserNotifications,
     mutateNotifications,
     ownBatchSchema,
@@ -13,8 +13,9 @@ import {
 } from './management'
 import { listNotifications, notificationWhere } from './query'
 import { identifier, listQuerySchema } from './schema'
-import { send, setState } from './server'
+import { send, setState, deleteRecord } from './server'
 import { notificationTransport } from './server-transport'
+import type { NotificationActor, NotificationContext, NotificationListContext } from './types'
 export type {
     NotificationFilter,
     UserNotificationQuery,
@@ -23,12 +24,21 @@ export type {
     NotificationBatchResult,
 } from './management'
 import { createNotificationModel } from './fields'
-import type { NotificationInput, NotificationFields, NotificationFieldFilters, NotificationKinds } from './fields'
+import type {
+    NotificationInput,
+    NotificationFields,
+    NotificationFieldFilters,
+    NotificationTypes,
+    NotificationFieldsOf,
+} from './fields'
 export type {
     NotificationInput,
     NotificationContent,
     NotificationFields,
-    NotificationKinds,
+    NotificationField,
+    NotificationFieldsOf,
+    NotificationChanges,
+    NotificationTypes,
     NotificationSchema,
     NotificationFieldFilters,
     NotificationFilterField,
@@ -37,12 +47,20 @@ import type { NotificationOptions, RecipientFilter } from './types'
 
 export type { NotificationAction, NotificationListQuery } from './schema'
 export type {
-    ArchiveStateEvent,
     HookStatus,
     Notification,
     NotificationList,
+    NotificationCount,
     NotificationOptions,
-    ReadStateEvent,
+    NotificationAccess,
+    NotificationHooks,
+    NotificationLifecycle,
+    NotificationCreateContext,
+    NotificationMutationContext,
+    NotificationListContext,
+    NotificationScope,
+    NotificationSession,
+    NotificationOperation,
     RecipientAccount,
     RecipientContext,
     RecipientData,
@@ -55,16 +73,36 @@ export type {
 export function notification<
     TContext = undefined,
     const F extends NotificationFields = {},
-    const K extends NotificationKinds<F> = {},
+    const K extends NotificationTypes = {},
 >(options: NotificationOptions<TContext, F, K> = {}) {
-    const model = createNotificationModel(options.schema, options.kinds, options.filterableFields)
-    const querySchema = listQuerySchema.extend({ fields: z.custom<NotificationFieldFilters<F>>().optional() })
+    const model = createNotificationModel(options.fields, options.types, options.schema, options.list?.filters)
+    const querySchema = listQuerySchema.extend({
+        fields: z.custom<NotificationFieldFilters<NotificationFieldsOf<F, K>>>().optional(),
+    })
     const countQuerySchema = querySchema.omit({ cursor: true, limit: true, read: true }).optional()
     const targetSchema = userTargetSchema.extend({
         filter: notificationFilterSchema
-            .extend({ fields: z.custom<NotificationFieldFilters<F>>().optional() })
+            .extend({ fields: z.custom<NotificationFieldFilters<NotificationFieldsOf<F, K>>>().optional() })
             .optional(),
     })
+    const withList = async <R extends object>(
+        ctx: NotificationContext,
+        userId: string,
+        actor: NotificationActor,
+        run: (where: import('@better-auth/core/db/adapter').Where[]) => Promise<R>,
+    ): Promise<R & { hook: import('./types').HookStatus }> => {
+        const event: NotificationListContext = {
+            operation: 'list',
+            userId,
+            session: actor.session,
+            headers: actor.headers,
+        }
+        const where = await listScope(options.access?.list, event, model)
+        await before(options.hooks?.list?.before, event)
+        const result = await run(where)
+        const hook = await after(ctx, options.hooks?.list?.after, event)
+        return { ...result, hook }
+    }
     return {
         id: 'notification',
         ...notificationTransport,
@@ -84,11 +122,17 @@ export function notification<
                 },
                 async (ctx) => {
                     const prepared = await model.prepare(ctx.body.notification)
-                    return send(ctx.context, options, model, {
-                        ...ctx.body,
-                        notification: prepared.content,
-                        contentHash: prepared.contentHash,
-                    })
+                    return send(
+                        ctx.context,
+                        options,
+                        model,
+                        {
+                            ...ctx.body,
+                            notification: prepared.content,
+                            contentHash: prepared.contentHash,
+                        },
+                        serverActor(ctx.headers),
+                    )
                 },
             ),
 
@@ -100,7 +144,11 @@ export function notification<
                     use: [sessionMiddleware],
                     metadata: { noStore: true },
                 },
-                async (ctx) => deleteNotification(ctx.context, ctx.context.session.user.id, ctx.body.id),
+                async (ctx) =>
+                    deleteRecord(ctx.context, options, model, ctx.context.session.user.id, ctx.body.id, [], {
+                        session: ctx.context.session,
+                        headers: new Headers(ctx.headers),
+                    }),
             ),
             deleteNotifications: createAuthEndpoint(
                 '/notification/delete-many',
@@ -117,6 +165,7 @@ export function notification<
                         model,
                         { ...ctx.body, userIds: [ctx.context.session.user.id] },
                         { field: 'delete' },
+                        { session: ctx.context.session, headers: new Headers(ctx.headers) },
                     ),
             ),
             setNotificationsRead: createAuthEndpoint(
@@ -134,6 +183,7 @@ export function notification<
                         model,
                         { ...ctx.body, userIds: [ctx.context.session.user.id] },
                         { field: 'readAt', value: ctx.body.read },
+                        { session: ctx.context.session, headers: new Headers(ctx.headers) },
                     ),
             ),
             setNotificationsArchived: createAuthEndpoint(
@@ -151,6 +201,7 @@ export function notification<
                         model,
                         { ...ctx.body, userIds: [ctx.context.session.user.id] },
                         { field: 'archivedAt', value: ctx.body.archived },
+                        { session: ctx.context.session, headers: new Headers(ctx.headers) },
                     ),
             ),
             listUserNotifications: createAuthEndpoint.serverOnly({ method: 'GET', query: targetSchema }, async (ctx) =>
@@ -188,7 +239,13 @@ export function notification<
                     use: [sessionMiddleware],
                     metadata: { noStore: true },
                 },
-                async (ctx) => listNotifications(ctx.context, model, ctx.context.session.user.id, ctx.query),
+                async (ctx) =>
+                    withList(
+                        ctx.context,
+                        ctx.context.session.user.id,
+                        { session: ctx.context.session, headers: new Headers(ctx.headers) },
+                        (where) => listNotifications(ctx.context, model, ctx.context.session.user.id, ctx.query, where),
+                    ),
             ),
             getUnreadNotificationCount: createAuthEndpoint(
                 '/notification/unread-count',
@@ -198,16 +255,25 @@ export function notification<
                     use: [sessionMiddleware],
                     metadata: { noStore: true },
                 },
-                async (ctx) => ({
-                    count: await ctx.context.adapter.count({
-                        model: 'notification',
-                        where: notificationWhere(
-                            ctx.context.session.user.id,
-                            { archived: 'unarchived', ...ctx.query, read: 'unread' },
-                            model,
-                        ),
-                    }),
-                }),
+                async (ctx) =>
+                    withList(
+                        ctx.context,
+                        ctx.context.session.user.id,
+                        { session: ctx.context.session, headers: new Headers(ctx.headers) },
+                        async (where) => ({
+                            count: await ctx.context.adapter.count({
+                                model: 'notification',
+                                where: [
+                                    ...where,
+                                    ...notificationWhere(
+                                        ctx.context.session.user.id,
+                                        { archived: 'unarchived', ...ctx.query, read: 'unread' },
+                                        model,
+                                    ),
+                                ],
+                            }),
+                        }),
+                    ),
             ),
             setNotificationRead: createAuthEndpoint(
                 '/notification/set-read',
@@ -226,6 +292,8 @@ export function notification<
                         ctx.body.id,
                         'readAt',
                         ctx.body.read,
+                        [],
+                        { session: ctx.context.session, headers: new Headers(ctx.headers) },
                     ),
             ),
             setNotificationArchived: createAuthEndpoint(
@@ -245,6 +313,8 @@ export function notification<
                         ctx.body.id,
                         'archivedAt',
                         ctx.body.archived,
+                        [],
+                        { session: ctx.context.session, headers: new Headers(ctx.headers) },
                     ),
             ),
         },

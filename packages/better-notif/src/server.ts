@@ -2,9 +2,18 @@
 import type { Where } from '@better-auth/core/db/adapter'
 import { APIError } from 'better-auth/api'
 
-import type { NotificationFields, NotificationKinds, NotificationModel } from './fields'
+import type { NotificationChanges } from './fields'
+import type { NotificationFields, NotificationTypes, NotificationModel } from './fields'
+import { authorize, before, after, serverActor } from './lifecycle'
+import type {
+    NotificationActor,
+    NotificationCreateContext,
+    NotificationMutationContext,
+    NotificationLifecycle,
+} from './types'
 import type {
     HookStatus,
+    Notification,
     NotificationContext,
     NotificationOptions,
     RecipientAccount,
@@ -16,22 +25,6 @@ import type {
     SendNotificationResult,
     StoredNotification,
 } from './types'
-
-export async function runHook<T>(
-    ctx: NotificationContext,
-    hook: ((event: T) => void | Promise<void>) | undefined,
-    event: T,
-): Promise<HookStatus> {
-    if (!hook) return 'skipped'
-    try {
-        await hook(event)
-        return 'completed'
-    } catch {
-        // App hook errors may contain provider credentials. Keep logs metadata-only.
-        ctx.logger.error('Notification hook failed after the database write; no automatic retry is performed')
-        return 'failed'
-    }
-}
 
 async function related<T extends { id: string }>(
     adapter: NotificationContext['adapter'],
@@ -143,11 +136,12 @@ export interface SendInput<TContext> {
     filter?: RecipientFilter<TContext> | undefined
 }
 
-export async function send<TContext, F extends NotificationFields, K extends NotificationKinds<F>>(
+export async function send<TContext, F extends NotificationFields, K extends NotificationTypes>(
     ctx: NotificationContext,
     options: NotificationOptions<TContext, F, K>,
     model: NotificationModel<F, K>,
     input: SendInput<TContext>,
+    actor: NotificationActor = serverActor(),
 ): Promise<SendNotificationResult<F, K>> {
     const ids =
         input.recipients === 'all'
@@ -168,7 +162,7 @@ export async function send<TContext, F extends NotificationFields, K extends Not
     // Scan at most 100 candidates per call; use application jobs and ID batches for large audiences.
     for (const userId of ids.slice(0, input.limit)) {
         try {
-            results.push(await sendOne(ctx, options, model, input, userId))
+            results.push(await sendOne(ctx, options, model, input, userId, actor))
         } catch (error) {
             const known = error instanceof APIError && error.body?.code?.startsWith('NOTIFICATION_')
             if (!known) ctx.logger.error('Notification recipient processing failed', { userId })
@@ -186,27 +180,43 @@ export async function send<TContext, F extends NotificationFields, K extends Not
     return { results, hasMore, nextCursor: hasMore ? ids[input.limit - 1]! : null }
 }
 
-async function sendOne<TContext, F extends NotificationFields, K extends NotificationKinds<F>>(
+async function sendOne<TContext, F extends NotificationFields, K extends NotificationTypes>(
     ctx: NotificationContext,
     options: NotificationOptions<TContext, F, K>,
     model: NotificationModel<F, K>,
     input: SendInput<TContext>,
     userId: string,
+    actor: NotificationActor,
 ): Promise<RecipientResult<F, K>> {
     const where: Where[] = [
         { field: 'userId', value: userId },
         { field: 'idempotencyKey', value: input.idempotencyKey },
     ]
     const existing = await ctx.adapter.findOne<StoredNotification>({ model: 'notification', where })
-    if (existing) return duplicate(existing, input.contentHash, model)
-
-    const base = await recipientData(ctx, userId, false)
     let pendingRecipient: Promise<RecipientContext<TContext>> | undefined
     const getRecipient = () =>
         (pendingRecipient ??= (async () => {
-            const data = await recipientData(ctx, userId, true, base.user)
+            const data = await recipientData(ctx, userId, true)
             return { ...data, context: await options.loadContext?.(data) }
         })())
+    const event = async (
+        row: StoredNotification | null,
+        presented?: Notification<F, K>,
+    ): Promise<NotificationCreateContext<TContext, F, K>> => ({
+        operation: 'create',
+        session: actor.session,
+        headers: actor.headers,
+        userId,
+        record: presented ?? (row ? await model.present(row) : null),
+        // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- prepare validated this type and changes removes private/foreign fields.
+        changes: model.changes(input.notification) as NotificationChanges<F, K>,
+        recipient: await getRecipient(),
+        idempotencyKey: input.idempotencyKey,
+    })
+    if (options.access?.create) await authorize(options.access.create, await event(existing))
+    if (existing) return duplicate(existing, input.contentHash, model)
+    // Check the recipient even when no application callback needs related data.
+    if (!pendingRecipient) await recipientData(ctx, userId, false)
     if (options.loadContext) await getRecipient()
     if (input.filter) {
         const matches = await input.filter(await getRecipient())
@@ -217,7 +227,8 @@ async function sendOne<TContext, F extends NotificationFields, K extends Notific
             })
         if (!matches) return { userId, status: 'skipped' }
     }
-
+    if (options.hooks?.create?.before)
+        await before(options.hooks.create.before, { ...(await event(null)), previous: null })
     let created: StoredNotification
     try {
         created = await ctx.adapter.create<StoredNotification>({
@@ -233,41 +244,40 @@ async function sendOne<TContext, F extends NotificationFields, K extends Notific
             },
         })
     } catch (error) {
-        // A concurrent insert may have won the database UNIQUE constraint.
         const winner = await ctx.adapter.findOne<StoredNotification>({ model: 'notification', where })
-        if (winner) return duplicate(winner, input.contentHash, model)
+        if (winner) {
+            if (options.access?.create) await authorize(options.access.create, await event(winner))
+            return duplicate(winner, input.contentHash, model)
+        }
         throw error
     }
     const notification = await model.present(created)
-    const onCreated = options.onNotificationCreated
-    const hook = await runHook(
-        ctx,
-        onCreated
-            ? async () => {
-                  await onCreated({
-                      notification,
-                      recipient: await getRecipient(),
-                      idempotencyKey: input.idempotencyKey,
-                  })
-              }
-            : undefined,
-        undefined,
-    )
+    let hook: HookStatus = 'skipped'
+    if (options.hooks?.create?.after) {
+        try {
+            hook = await after(ctx, options.hooks.create.after, {
+                ...(await event(created, notification)),
+                record: notification,
+                previous: null,
+            })
+        } catch {
+            ctx.logger.error('Notification after hook context failed')
+            hook = 'failed'
+        }
+    }
     return { userId, status: 'created', notification, hook }
 }
-
-async function duplicate<F extends NotificationFields, K extends NotificationKinds<F>>(
+async function duplicate<F extends NotificationFields, K extends NotificationTypes>(
     existing: StoredNotification,
     contentHash: string,
     model: NotificationModel<F, K>,
 ): Promise<RecipientResult<F, K>> {
-    if (existing.contentHash !== contentHash) {
+    if (existing.contentHash !== contentHash)
         throw new APIError('CONFLICT', {
             code: 'NOTIFICATION_IDEMPOTENCY_CONFLICT',
             message:
                 'This recipient and key identify different content or a legacy record without a content fingerprint',
         })
-    }
     return {
         userId: existing.userId,
         status: 'duplicate',
@@ -275,8 +285,7 @@ async function duplicate<F extends NotificationFields, K extends NotificationKin
         hook: 'skipped',
     }
 }
-
-export async function setState<TContext, F extends NotificationFields, K extends NotificationKinds<F>>(
+export async function setState<TContext, F extends NotificationFields, K extends NotificationTypes>(
     ctx: NotificationContext,
     options: NotificationOptions<TContext, F, K>,
     model: NotificationModel<F, K>,
@@ -285,29 +294,82 @@ export async function setState<TContext, F extends NotificationFields, K extends
     field: 'readAt' | 'archivedAt',
     value: boolean,
     conditions: Where[] = [],
+    actor: NotificationActor = serverActor(),
 ) {
-    const where: Where[] = [
-        { field: 'id', value: id },
-        { field: 'userId', value: userId },
-    ]
+    const where: Where[] = [{ field: 'id', value: id }, { field: 'userId', value: userId }, ...conditions]
+    const previous = await ctx.adapter.findOne<StoredNotification>({ model: 'notification', where })
+    if (!previous)
+        throw new APIError('NOT_FOUND', { code: 'NOTIFICATION_NOT_FOUND', message: 'Notification not found' })
+    const record = await model.present(previous)
     const timestamp = value ? new Date() : null
-    const changed = await ctx.adapter.updateMany({
-        model: 'notification',
-        where: [...where, ...conditions, { field, operator: value ? 'eq' : 'ne', value: null }],
-        update: { [field]: timestamp },
-    })
+    let hook: HookStatus = 'skipped'
+    const apply = async <O extends 'setRead' | 'setArchived'>(
+        operation: O,
+        changes: NotificationMutationContext<F, K, O>['changes'],
+        policy: ((event: NotificationMutationContext<F, K, O>) => boolean | Promise<boolean>) | undefined,
+        hooks: NotificationLifecycle<NotificationMutationContext<F, K, O> & { previous: typeof record }> | undefined,
+    ) => {
+        const event = {
+            operation,
+            changes,
+            record,
+            userId,
+            headers: actor.headers,
+            session: actor.session,
+            previous: record,
+        }
+        await authorize(policy, event, actor.managed)
+        if ((previous[field] !== null) === value) return 0
+        await before(hooks?.before, event)
+        const changed = await ctx.adapter.updateMany({
+            model: 'notification',
+            where: [...where, { field, operator: value ? 'eq' : 'ne', value: null }],
+            update: { [field]: timestamp },
+        })
+        if (changed) {
+            const saved = await ctx.adapter.findOne<StoredNotification>({ model: 'notification', where })
+            if (saved) hook = await after(ctx, hooks?.after, { ...event, record: await model.present(saved) })
+        }
+        return changed
+    }
+    const changed =
+        field === 'readAt'
+            ? await apply('setRead', { readAt: timestamp }, options.access?.setRead, options.hooks?.setRead)
+            : await apply(
+                  'setArchived',
+                  { archivedAt: timestamp },
+                  options.access?.setArchived,
+                  options.hooks?.setArchived,
+              )
     const row = await ctx.adapter.findOne<StoredNotification>({ model: 'notification', where })
     if (!row) throw new APIError('NOT_FOUND', { code: 'NOTIFICATION_NOT_FOUND', message: 'Notification not found' })
-    let hook: HookStatus = 'skipped'
-    if (changed) {
-        hook =
-            field === 'readAt'
-                ? await runHook(ctx, options.onReadStateChanged, { notificationId: id, userId, readAt: timestamp })
-                : await runHook(ctx, options.onArchiveStateChanged, {
-                      notificationId: id,
-                      userId,
-                      archivedAt: timestamp,
-                  })
-    }
     return { notification: await model.present(row), changed: changed > 0, hook }
+}
+export async function deleteRecord<TContext, F extends NotificationFields, K extends NotificationTypes>(
+    ctx: NotificationContext,
+    options: NotificationOptions<TContext, F, K>,
+    model: NotificationModel<F, K>,
+    userId: string,
+    id: string,
+    conditions: Where[] = [],
+    actor: NotificationActor = serverActor(),
+) {
+    const where: Where[] = [{ field: 'id', value: id }, { field: 'userId', value: userId }, ...conditions]
+    const row = await ctx.adapter.findOne<StoredNotification>({ model: 'notification', where })
+    if (!row) return { deleted: false, hook: 'skipped' as HookStatus }
+    const record = await model.present(row)
+    const event: NotificationMutationContext<F, K, 'delete'> & { previous: typeof record } = {
+        operation: 'delete',
+        record,
+        previous: record,
+        changes: {},
+        userId,
+        session: actor.session,
+        headers: actor.headers,
+    }
+    await authorize(options.access?.delete, event, actor.managed)
+    await before(options.hooks?.delete?.before, event)
+    const deleted = (await ctx.adapter.deleteMany({ model: 'notification', where })) > 0
+    const hook = deleted ? await after(ctx, options.hooks?.delete?.after, event) : 'skipped'
+    return { deleted, hook }
 }

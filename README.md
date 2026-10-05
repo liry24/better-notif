@@ -1,10 +1,12 @@
 # better-notif
 
-Notifications for Better Auth: typed application fields, read/unread state, archiving, deletion, and application-owned delivery hooks.
+Notifications for Better Auth with typed application fields, read/unread state, archiving, deletion, and application-owned delivery hooks.
 
-The first npm release is pending. Install a local tarball or a CI package preview. Supported runtime and Better Auth ranges are declared in the [package manifest](packages/better-notif/package.json). SQLite is the tested database.
+```sh
+npm install better-notif
+```
 
-Node 22.0.0 or newer is supported with `better-sqlite3`. Using Better Auth with `node:sqlite` requires Node 22.16.0 or newer because that adapter uses `StatementSync.columns()`. Repository development uses Vite+, which requires Node 22.18.0 or a supported newer release.
+The first npm publication is pending. For current builds, install a CI package preview or a local tarball. Supported runtime and Better Auth ranges are declared in the [package manifest](packages/better-notif/package.json). SQLite is the tested database.
 
 ## Register the plugin
 
@@ -16,47 +18,37 @@ import * as z from 'zod'
 export const auth = betterAuth({
   plugins: [
     notification({
-      schema: {
-        notification: {
-          additionalFields: {
-            postId: {
-              type: 'string',
-              required: false,
-              validator: { input: z.string().min(1) },
-            },
-            amount: {
-              type: 'number',
-              required: false,
-              validator: { input: z.string().transform(Number) },
-            },
+      types: {
+        'post.published': {
+          fields: {
+            postId: { type: 'string', validate: z.string().min(1) },
+          },
+        },
+        'invoice.ready': {
+          fields: {
+            amount: { type: 'number', validate: z.string().transform(Number) },
           },
         },
       },
-      kinds: {
-        'post.published': { required: ['postId'] },
-        'invoice.ready': { required: ['amount'] },
-      },
-      filterableFields: ['postId', 'amount'],
+      list: { filters: ['postId', 'amount'] },
     }),
   ],
 })
 ```
 
-`additionalFields` uses Better Auth's native `DBFieldAttribute` definitions. The example creates nullable `postId` and `amount` columns on one `notification` table. `kinds` lists fields required when sending each kind; it does not redefine their types. A field with `required: true` (the default) is required for every notification. Omit `kinds`, or pass `{}`, to accept arbitrary type strings.
+Declare fields alongside their notification type. `type` selects native database storage; `validate` accepts Zod, Valibot, or another Standard Schema validator. No schema introspection, converter, helper import, or extra ORM is required. Synchronous and asynchronous validators run once per send before recipient processing. Their transformed values must fit the declared storage type.
 
-Zod, Valibot, and other Standard Schema validators work through `validator.input`. Synchronous and asynchronous validators run before recipient processing. Their transformed values must fit the declared database field type. Native defaults, `input: false`, `returned: false`, `fieldName`, references, indexes, and adapter transforms retain their roles. Use `modelName` to rename the table. Built-in field names and duplicate column names are rejected.
+Fields are required within their type unless `required: false` or `defaultValue` allows omission. Different types share one notification table; type-local columns are physically nullable so unrelated notifications can omit them. A notification cannot supply another type's fields. Optional values return `null`; unrelated fields are absent from current results. Put fields used by every type in the root `fields` option. Omit `types`, or use `{}`, to accept arbitrary type strings.
 
-There is no required `data` field or schema-conversion step. Add a native `json` field explicitly when your application needs one. Its stored root must be a JSON-safe object or array (or `null` for an optional field); nested JSON scalars are supported. Use native string, number, or boolean fields for scalar roots. Native date fields accept `Date` objects. Output validators may explicitly return JSON-safe values or a `Date`.
-
-Generate the database schema with the [official Better Auth CLI](https://better-auth.com/docs/concepts/cli):
+Generate and apply the database schema using the [Better Auth CLI](https://better-auth.com/docs/concepts/cli):
 
 ```sh
-bunx auth@1.7.7 generate
-# Built-in SQLite adapter: apply the migration directly.
-bunx auth@1.7.7 migrate
+npx auth@latest generate
+# Built-in SQLite adapter:
+npx auth@latest migrate
 ```
 
-For Prisma or Drizzle, apply the generated schema through your ORM's migration tooling. The plugin requires its unique `(userId, idempotencyKey)` index for concurrent send safety. Registration, database migration, and the separate browser client plugin are the normal integration steps.
+For an ORM adapter, apply the generated schema through its migration tooling. Registration, migration, and the separate browser client plugin are the normal integration steps. The unique `(userId, idempotencyKey)` index is required for concurrent send safety.
 
 ## Send from your server
 
@@ -75,13 +67,13 @@ const result = await auth.api.sendNotification({
 })
 ```
 
-`sendNotification` is server-only: it has no HTTP route and is absent from the browser client. Input types, results, and hooks infer your additional fields. For `invoice.ready`, `amount` is required as a string on input and becomes a number after validation.
+`sendNotification` is server-only, with no HTTP route or browser client method. Inputs, results, callbacks, and client views infer your fields. For `invoice.ready`, `amount` is a string on input and a number after validation.
 
-Results contain `created`, `duplicate`, `skipped`, or `failed` per recipient. A duplicate returns the saved notification without replaying the creation hook. Reusing a key with different validated, explicitly supplied content returns `NOTIFICATION_IDEMPOTENCY_CONFLICT`. Generated defaults and adapter transforms are excluded from the comparison; the first saved values are retained. JSON object key order does not matter.
+Results contain `created`, `duplicate`, `skipped`, or `failed` per recipient. A duplicate returns the saved notification without replaying lifecycle hooks. Reusing a key with different validated, explicitly supplied content returns `NOTIFICATION_IDEMPOTENCY_CONFLICT`. Generated defaults and adapter transforms are excluded from comparison; the first saved values are retained. JSON object key order does not matter.
 
-Each call scans at most 100 recipients. `recipients` accepts up to 10,000 explicit IDs; IDs are deduplicated and sorted. Use `limit` and the returned `nextCursor` to continue, keeping the other inputs consistent. Retry failed recipient IDs separately without a cursor. Lists and cursors reflect live data, so save an explicit audience in your application when a fixed snapshot is needed.
+Each call scans at most 100 recipients. Explicit audiences accept up to 10,000 IDs, deduplicated and sorted. Continue with `limit` and `nextCursor`, keeping other inputs consistent. Retry failed IDs separately without a cursor. Cursors reflect live data; save an audience in your application when you need a fixed snapshot.
 
-`filter({ user, accounts, sessions, context })` can select recipients asynchronously. Add application data with `loadContext` on the plugin. Account/session queries run only when a filter, context loader, or creation hook needs them; creation-only hooks load them after persistence. Account credentials and session tokens are excluded; context is not persisted or sent to the browser. Existing duplicates skip context loading and filtering.
+`filter({ user, accounts, sessions, context })` selects recipients asynchronously. `loadContext` adds application-owned context. Related data loads only when a filter, context loader, creation policy, or creation hook needs it. An after-only creation hook loads it after persistence. Duplicates skip filtering and lifecycle hooks; a configured creation policy still loads context and rechecks access. Account credentials and recipient session tokens are excluded. Context is not persisted or sent to the browser.
 
 ## Browser integration
 
@@ -109,17 +101,13 @@ await authClient.notification.setArchivedMany({ ids: ['one', 'two'], archived: f
 await authClient.notification.deleteMany({ ids: ['one', 'two'] })
 ```
 
-Every browser operation requires a session and scopes database queries to that user. Foreign IDs behave like missing IDs. Bulk operations accept up to 100 IDs and return an item result for each attempted ID; they can partially succeed.
+Every browser operation requires a session and scopes database queries to its user. Foreign IDs behave like missing IDs. Bulk operations accept up to 100 IDs and can partially succeed.
 
-The client preserves strings exactly, including ISO-formatted strings inside JSON and arrays, and restores actual server `Date` values. Successful notification responses carry an `x-better-notif-date-paths` header; their JSON body stays unchanged. The client applies this metadata before output validation, success callbacks, and query updates. Other auth routes and error responses keep the caller's parser. Proxies must preserve this header; the server adds it to `Access-Control-Expose-Headers` for browser access. Custom hooks that change notification response values must run before this plugin's after hook.
+`list` returns `{ notifications, total, nextCursor, hasMore, hook }`, ordered by creation time and ID descending. Pass `nextCursor` as `cursor` with the same filters to continue. Filters include `type`, `read: 'all' | 'read' | 'unread'`, `archived: 'all' | 'archived' | 'unarchived'`, and `fields: { postId: '123' }`. They apply before the page limit; `total` counts all matching records. The default is 20 unarchived notifications.
 
-Date metadata is ASCII JSON `{ v: 1, paths: string[][] }`, limited to 6 KiB. A `*` segment selects array elements whose existing values at that path are dates or `null`, skipping absent branches such as missing batch records. This keeps ordinary 100-record responses within the limit. Missing, malformed, or oversized metadata fails explicitly rather than guessing which strings are dates. Excessive application date fields return `NOTIFICATION_TRANSPORT_LIMIT`; reduce the page/batch size or returned date fields. Writes already completed are not rolled back: error bodies include `mutationResults` with IDs, statuses, hook outcomes, and batch continuation metadata so callers can reconcile them.
+Field equality filters must be enabled in `list.filters` and use native storage types. Dates also accept ISO strings over HTTP. Private fields, JSON/array fields, and fields with adapter transforms cannot be enabled. `unreadCount({ query: { type, fields, archived } })` returns `{ count, hook }`, shares list access and filters, and always counts unread records. It excludes archived records by default.
 
-`list` returns `{ notifications, total, nextCursor, hasMore }`, ordered by creation time and ID descending. Pass `nextCursor` as `cursor` with the same filters to continue. Results reflect live data. Filters include `type`, `read: 'all' | 'read' | 'unread'`, `archived: 'all' | 'archived' | 'unarchived'`, and `fields: { postId: '123' }`. They apply before the page limit; `total` counts all matching records, including older unread entries. The default is 20 unarchived notifications.
-
-`fields` permits equality checks only for explicitly configured `filterableFields`. Values use native database types; dates also accept ISO strings over HTTP. Private fields, JSON/array fields, and fields with adapter transforms cannot be enabled. `unreadCount({ query: { type, fields, archived } })` uses the same filters and always counts unread records; it excludes archived records by default.
-
-React and Vue clients expose `useNotifications()` and `useUnreadNotificationCount()`. Vanilla clients expose subscribable atoms under the same names. These use the default shared view. For independent views, create one query instance per view:
+React and Vue expose `useNotifications()` and `useUnreadNotificationCount()`. Vanilla clients expose subscribable atoms with those names. For independent views, create one query instance per view:
 
 ```ts
 const inbox = authClient.notification.createQuery({ read: 'unread' })
@@ -132,13 +120,69 @@ post.dispose()
 inbox.dispose()
 ```
 
-Instances expose `notifications` and `unreadCount` as Nanostores atoms for direct subscriptions or framework bindings, plus a stable query `key`. Their filters, pages, and errors remain independent. Release subscriptions and call `dispose()` when a view is removed. Mutations refresh active views; session changes clear every view and discard previous-user responses. Refresh server-side arrivals explicitly with the instance's `refetch()` or `authClient.notification.refetch()` for the default view. No polling or push connection is installed, and SSR subscriptions do not fetch automatically.
+Instances expose `notifications` and `unreadCount` Nanostores atoms, a stable query `key`, and independent filters, pages, and errors. Release subscriptions and call `dispose()` when a view is removed. Mutations refresh active views; session changes clear views and discard previous-user responses. Refresh server arrivals with the instance's `refetch()` or `authClient.notification.refetch()` for the default view. No polling or push connection is installed; SSR subscriptions do not fetch automatically.
 
-Use Better Auth's `hooks.before` for application-specific permission checks on recipient mutation routes. Trusted server APIs require the caller's own authorization.
+The client preserves strings exactly, including ISO-formatted strings inside JSON/arrays, and restores actual server `Date` values. Notification responses carry `x-better-notif-date-paths` while retaining their ordinary JSON body. Metadata is applied before output validation, callbacks, and query updates. Other auth routes and errors retain the caller's parser. Proxies must preserve the header; it is exposed for browser CORS access. Custom hooks changing response values must run before this plugin's after hook.
+
+The ASCII metadata `{ v: 1, paths: string[][] }` is limited to 6 KiB. `*` selects array elements with dates or `null` at that path, skipping absent branches, so ordinary 100-record responses fit. Missing/invalid metadata fails explicitly. Excessive date fields return `NOTIFICATION_TRANSPORT_LIMIT`; reduce the page/batch size or returned fields. Completed writes remain saved: error bodies include `mutationResults` with IDs, statuses, hook outcomes, and continuation metadata for reconciliation.
+
+## Access
+
+Application authorization belongs in `access`; lifecycle work belongs in `hooks`.
+
+```ts
+notification({
+  access: {
+    create: ({ recipient }) => recipient.user.emailVerified,
+    list: () => ({ where: [{ field: 'type', value: 'post.published' }] }),
+    setRead: ({ session, record }) => record.userId === session?.user.id,
+    setArchived: () => true,
+    delete: () => false,
+  },
+})
+```
+
+Creation and mutation policies must return an explicit Boolean. `false`, invalid/missing returns, and thrown policies deny access. List access returns `false` or `{ where: [...] }`: at most 20 native scalar conditions using `eq`, `ne`, `lt`, `lte`, `gt`, `gte`, or `in`. `in` accepts 1–100 strings/numbers. Every condition is ANDed with mandatory ownership and requested filters before pagination and counting. OR connectors, transformed columns, and unsupported values are rejected.
+
+Omitted policies retain the plugin's intrinsic permissions: server-only creation and a recipient's own records. Application policies can further restrict these boundaries. Policies are rechecked on duplicate sends and unchanged state operations, including an insert race's winning record. Session enforcement and ownership cannot be overridden by a policy returning `true`.
+
+Callback `session` comes from the recipient endpoint's session middleware. Creation and trusted maintenance use `session: null`; supplying headers does not authenticate a server-only send. Authorize your application caller before invoking those server APIs.
+
+## Operations and hooks
+
+`hooks.create`, `hooks.list`, `hooks.setRead`, `hooks.setArchived`, and `hooks.delete` each accept `before` and `after` callbacks. Normal completion continues the operation; hooks return no value. They do not return Boolean permission decisions.
+
+```ts
+notification({
+  hooks: {
+    create: {
+      before: ({ changes }) => {
+        // Validated values, before adapter transforms.
+      },
+      after: async ({ record, recipient, idempotencyKey }) => {
+        await enqueueApplicationDelivery(record, recipient.context, idempotencyKey)
+      },
+    },
+    setRead: {
+      after: ({ record, previous, changes }) => {
+        // record is the saved view; previous is the view before the change.
+      },
+    },
+  },
+})
+```
+
+Contexts include `operation`, `userId`, `headers`, and `session`. Creation also includes `recipient`, `idempotencyKey`, and validated `changes`; `record` is null before a new insert and present afterward. State callbacks receive `changes.readAt` or `changes.archivedAt`. Delete callbacks receive the deleted record's view. Mutation lifecycle callbacks include `previous`; creation uses `previous: null`.
+
+`record` and `previous` retain the public notification view: output validators apply and `returned: false` fields are excluded. Creation `changes` contains public Standard Schema output before native adapter transforms and output validators. Callback copies isolate records, changes, session data, and headers from library operations. Opaque application `recipient.context` remains application-owned. Use field validators/transforms to change stored values.
+
+Before hooks are awaited after access and may throw to prevent a write. After hooks are awaited after successful work; failure does not undo it. Results report `hook: 'completed' | 'failed' | 'skipped'`. A write with `hook: 'failed'` is saved; do not retry the write as if it failed. Lists/counts retain their successfully read data with `hook: 'failed'` when their after callback fails. Callback error details are not exposed or logged.
+
+Normal duplicates and no-op state changes skip before/after callbacks. Before callbacks may run for a write attempt that loses a concurrent race; after callbacks run only for actual writes. The list callbacks also run for unread counts. Hooks have no automatic retry or guaranteed external delivery. Use your application's queue for durable delivery.
 
 ## Trusted server management
 
-Use these server-only APIs for jobs operating on explicit users, without a session cookie:
+Server-only APIs support jobs targeting explicit users without a session cookie:
 
 ```ts
 const page = await auth.api.listUserNotifications({
@@ -152,26 +196,32 @@ await auth.api.deleteUserNotifications({
 const count = await auth.api.getUserUnreadNotificationCount({ query: { userIds: ['user-1'] } })
 ```
 
-`userIds` is required: up to 100 IDs or explicit `'all'`. Listing and mutations also accept `ids`, `filter`, `limit`, and `cursor`. Supported filters are `type`, `read`, `archived`, `fields`, and `createdBefore`. They process at most 100 records per call in ID order; continue with `nextCursor`. Mutation results are `updated`, `unchanged`, `deleted`, `not_found`, or `failed`. Failed IDs advance the cursor and need separate retries. These endpoints have no HTTP route; any application route wrapping them owns its authorization.
+`userIds` is required: up to 100 IDs or explicit `'all'`. Listing/mutations also accept `ids`, `filter`, `limit`, and `cursor`. Filters are `type`, `read`, `archived`, `fields`, and `createdBefore`. Each call processes at most 100 records in ID order; continue with `nextCursor`. Mutation results are `updated`, `unchanged`, `deleted`, `not_found`, or `failed`. Failed IDs advance the cursor and need separate retries.
 
-Deletion is physical. Deleting a notification also removes its idempotency record, so sending the same key again can create a notification and run the creation hook again. There is no deletion hook or tombstone.
+Maintenance bypasses application `access` policies; mutation lifecycle hooks still run. Trusted listing/counting bypass list hooks too. These APIs have no HTTP route; any wrapping application route owns its authorization. Deletion is physical and removes idempotency history. Sending the same key after deletion can create a new notification and run creation hooks again; there is no tombstone.
 
-## Hooks and retained data
+## Native storage and retained data
 
-| Option                  | Purpose                                                                                 |
-| ----------------------- | --------------------------------------------------------------------------------------- |
-| `loadContext`           | Load application-owned recipient context for filtering and creation hooks.              |
-| `onNotificationCreated` | Receive `{ notification, recipient, idempotencyKey }` after a successful insert.        |
-| `onReadStateChanged`    | Receive `{ notificationId, userId, readAt }` after a read/unread transition.            |
-| `onArchiveStateChanged` | Receive `{ notificationId, userId, archivedAt }` after an archive/unarchive transition. |
+Field declarations retain Better Auth's `DBFieldAttribute` settings: `input`, `returned`, `defaultValue`, `fieldName`, references, indexes, uniqueness, `transform`, and advanced `validator.input`/`validator.output`. `validate` is the compact input-validator spelling; do not combine it with `validator.input`. For fields with native adapter transforms, public inference uses the storage type unless `validator.output` declares the public result. Use `schema.modelName` to map the notification table. Reserved field names and conflicting physical columns are rejected at configuration time.
 
-Hooks are awaited after successful writes. Duplicates and unchanged states skip them. A thrown hook leaves the write intact and reports `hook: 'failed'`; callback details are not exposed. Hooks have no automatic retry or guaranteed external delivery. Use your application's queue when durable email or other delivery is required.
+The same logical field may appear in several types if native storage metadata agrees. Its requiredness, defaults, and Standard Schema validators may differ by type. Common fields cannot be redeclared locally. Type-local defaults run only for that type; unrelated columns stay `null`. An omitted input uses native `defaultValue`, rather than executing a schema validator on `undefined`. Native uniqueness and references apply to the whole physical table.
 
-Reads do not replay input validators or defaults. `schemaStatus: 'legacy'` identifies removed kinds, missing required values, incompatible native field values, or failed output validation. Legacy fields are typed as `unknown`; notifications remain readable and manageable, and private fields remain excluded. `schemaStatus: 'current'` permits narrowing by `type`. It is not a claim that old records were rechecked against today's input refinements. Use `validator.output` for explicit read validation and migrate retained records when refining their contract. Failed output validation returns `null` for that field with legacy status.
+There is no required JSON payload. Declare a native `json` field when needed. Its stored root must be a JSON-safe object/array, or `null` for an optional field; nested scalars are supported. Native scalar fields handle scalar roots and date fields accept `Date`. Output validators may return JSON-safe values or a valid `Date`.
 
-Adding, renaming, or removing columns requires an application migration and any necessary data backfill. Native `modelName` and `fieldName` map existing table/column names. Records without a content fingerprint cannot safely deduplicate a new send and report a conflict.
+Reads never replay input validators or defaults. `schemaStatus: 'legacy'` covers removed types, missing required values, incompatible native values, or failed output validation. Legacy fields are typed `unknown`; records remain manageable and private fields remain excluded. `schemaStatus: 'current'` enables narrowing by `type`, without claiming historical data passed today's input refinements. Use `validator.output` for explicit read validation; failures return `null` for that field with legacy status.
 
-Actions contain `id`, `label`, and optional root-relative or HTTP(S) `href`. The app owns action execution and authorization. Limits and URL validation are defined in [schema.ts](packages/better-notif/src/schema.ts).
+Column changes require application migrations/backfills. Native `modelName`/`fieldName` can map existing names. Records without a content fingerprint conflict when deduplicating a new send. Actions contain `id`, `label`, and optional root-relative or HTTP(S) `href`; execution and authorization belong to the app. Limits and URL rules are in [schema.ts](packages/better-notif/src/schema.ts).
+
+## Development
+
+Use the repository's pinned package manager and local Vite+ tooling:
+
+```sh
+vp install --frozen-lockfile
+vp run check
+```
+
+The minimum package runtime is exercised with `better-sqlite3`; `node:sqlite` requires a newer Node release for `StatementSync.columns()`. Development tooling has its own engine requirement. See the manifests and CI for the exact tested versions and matrices. Consumer tests install a fresh tarball and verify the exact archive.
 
 ## License
 

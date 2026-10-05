@@ -136,7 +136,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { betterAuth } from 'better-auth'
 import { createAuthClient } from 'better-auth/client'
 import { getMigrations } from 'better-auth/db/migration'
-import { notification, type NotificationFields, type NotificationKinds } from 'better-notif'
+import { notification, type NotificationFields, type NotificationTypes } from 'better-notif'
 import { notificationClient } from 'better-notif/client'
 import * as z from 'zod'
 import * as v from 'valibot'
@@ -144,8 +144,8 @@ export type IsAny<T> = 0 extends 1 & T ? true : false
 export type Concrete<T> = IsAny<T> extends true ? false : unknown extends T ? false : true
 export type Equal<T, U> = (<V>() => V extends T ? 1 : 2) extends <V>() => V extends U ? 1 : 2 ? true : false
 function assertType<T extends true>(proof: T) { return proof }
-function configure<const F extends NotificationFields, const K extends NotificationKinds<F>>(fields: F, kinds: K) {
-  return notification({ schema: { notification: { additionalFields: fields } }, kinds })
+function configure<const F extends NotificationFields, const K extends NotificationTypes>(fields: F, types: K) {
+  return notification({ fields, types })
 }
 assertType<Concrete<typeof notification>>(true)
 assertType<Concrete<ReturnType<typeof notification>>>(true)
@@ -159,8 +159,7 @@ assertType<Concrete<ReturnType<ReturnType<GenericClientPlugin['getActions']>['no
 const requestedNode = process.env.NOTIFICATION_NODE_VERSION
 if (requestedNode) assert(requestedNode.includes('.') ? process.versions.node === requestedNode : process.versions.node.startsWith(requestedNode + '.'))
 const additionalFields = {
-  amount: { type: 'number', required: false, validator: { input: z.string().transform(Number) } },
-  slug: { type: 'string', required: false, validator: { input: v.pipe(v.string(), v.trim()) } },
+  nativeAmount: { type: 'number', required: false, validate: z.string(), transform: { input: (value: unknown) => value === null ? null : Number(value) } },
   summary: { type: 'string', required: false, validator: { output: z.string().transform((value) => value.length) } },
   label: { type: 'string', required: false },
   metadata: { type: 'json', required: false, validator: { input: z.object({ values: z.array(z.string()) }) } },
@@ -169,9 +168,9 @@ const additionalFields = {
   displayDate: { type: 'date', required: false, validator: { output: z.date().transform((date) => date.toISOString()) } },
   computedDate: { type: 'string', required: false, validator: { output: v.pipe(v.string(), v.transform((value) => new Date(value))) } },
 } as const
-const kinds = { invoice: { required: ['amount'] }, post: { required: ['slug'] } } as const
+const types = { invoice: { fields: { amount: { type: 'number', validate: z.string().transform(Number) } } }, post: { fields: { slug: { type: 'string', validate: v.pipe(v.string(), v.trim()) } } } } as const
 const database = new DatabaseSync(':memory:')
-export const auth = betterAuth({ database, baseURL: 'http://localhost:3000', secret: 'packed-consumer-secret-more-than-thirty-two-characters', emailAndPassword: { enabled: true }, advanced: { disableOriginCheck: false, disableCSRFCheck: false }, plugins: [notification({ schema: { notification: { additionalFields } }, kinds, filterableFields: ['amount', 'slug'], loadContext: () => ({ scope: 'example' }), onNotificationCreated: ({ notification: item, recipient }) => { assertType<Concrete<typeof item>>(true); assertType<Concrete<typeof recipient>>(true); assertType<Equal<typeof recipient.context, { scope: string } | undefined>>(true); if (item.schemaStatus === 'current' && item.type === 'invoice') { assertType<Equal<typeof item.amount, number>>(true); assertType<Equal<typeof item.summary, number | null>>(true); const amount: number = item.amount; assert.equal(amount, 42) } } })], logger: { disabled: true } })
+export const auth = betterAuth({ database, baseURL: 'http://localhost:3000', secret: 'packed-consumer-secret-more-than-thirty-two-characters', emailAndPassword: { enabled: true }, advanced: { disableOriginCheck: false, disableCSRFCheck: false }, plugins: [notification({ fields: additionalFields, types, list: { filters: ['amount', 'slug'] }, loadContext: () => ({ scope: 'example' }), access: { create: ({ changes, record }) => { assertType<Concrete<typeof record>>(true); assertType<Concrete<typeof changes>>(true); if (changes.type === 'invoice') assertType<Equal<typeof changes.amount, number>>(true); return true }, list: () => ({ where: [] }) }, hooks: { create: { before: ({ changes, record, previous }) => { assertType<Concrete<typeof changes>>(true); assertType<Concrete<typeof record>>(true); assertType<Equal<typeof previous, null>>(true); assertType<Equal<typeof changes.summary, string | null>>(true); assertType<Equal<typeof changes.nativeAmount, string | null>>(true); if (changes.type === 'invoice') assertType<Equal<typeof changes.amount, number>>(true) }, after: ({ record: item, recipient }) => { assertType<Concrete<typeof item>>(true); assertType<Concrete<typeof recipient>>(true); assertType<Equal<typeof recipient.context, { scope: string } | undefined>>(true); if (item.schemaStatus === 'current' && item.type === 'invoice') { assertType<Equal<typeof item.amount, number>>(true); assertType<Equal<typeof item.summary, number | null>>(true); assertType<Equal<typeof item.nativeAmount, number | null>>(true); const amount: number = item.amount; assert.equal(amount, 42) } } } } })], logger: { disabled: true } })
 assertType<Concrete<typeof auth.api.sendNotification>>(true)
 assertType<Concrete<Parameters<typeof auth.api.sendNotification>[0]>>(true)
 assertType<Concrete<Awaited<ReturnType<typeof auth.api.sendNotification>>>>(true)
@@ -183,13 +182,15 @@ const signup = await registered.json() as { user: { id: string } }
 const iso = '2026-01-01T00:00:00.000Z'
 const precise = '2026-01-01T00:00:00.123456Z'
 const strings = [iso, precise, '2026-01-01T09:00:00+09:00']
-const body = { recipients: [signup.user.id], notification: { type: 'invoice' as const, title: iso, amount: '42', label: precise, metadata: { values: strings }, timestamps: strings, dueAt: new Date(iso), displayDate: new Date(iso), computedDate: iso, actions: [{ id: iso, label: precise, href: '/example' }] }, idempotencyKey: 'packed' }
+const body = { recipients: [signup.user.id], notification: { type: 'invoice' as const, title: iso, amount: '42', nativeAmount: '7', label: precise, metadata: { values: strings }, timestamps: strings, dueAt: new Date(iso), displayDate: new Date(iso), computedDate: iso, actions: [{ id: iso, label: precise, href: '/example' }] }, idempotencyKey: 'packed' }
 assert.equal((await auth.api.sendNotification({ body })).results[0]?.status, 'created')
 assert.equal((await auth.api.sendNotification({ body })).results[0]?.status, 'duplicate')
 const cookie = registered.headers.getSetCookie().map((value) => value.split(';')[0]).join('; ')
 const response = await auth.handler(new Request('http://localhost:3000/api/auth/notification/list', { headers: { cookie } }))
 assert.equal(response.status, 200)
-assert.equal((await response.json()).notifications[0].amount, 42)
+const rawResponse = await response.json()
+assert.equal(rawResponse.notifications[0].amount, 42)
+assert.equal(rawResponse.notifications[0].nativeAmount, 7)
 const packedClient = createAuthClient({ baseURL: 'http://localhost:3000', plugins: [notificationClient<typeof auth>()], fetchOptions: { customFetchImpl: (input, init) => {
   const request = new Request(input, init)
   request.headers.set('cookie', cookie)
@@ -239,7 +240,16 @@ const removed = await auth.api.deleteUserNotifications({ body: { userIds: [signu
 assert.equal(removed.results.length, 2)
 assert(removed.results.every((result) => result.status === 'deleted'))
 if (false) {
-  const configuredAuth = betterAuth({ plugins: [configure(additionalFields, kinds)] })
+
+  // @ts-expect-error Access requires an explicit Boolean decision.
+  notification({ access: { create: () => {} } })
+  // @ts-expect-error List access accepts false or a declarative scope.
+  notification({ access: { list: () => true } })
+  // @ts-expect-error Lifecycle before does not accept Boolean decisions.
+  notification({ hooks: { create: { before: () => false } } })
+  // @ts-expect-error Async lifecycle before does not accept Boolean decisions.
+  notification({ hooks: { setRead: { before: async () => false } } })
+  const configuredAuth = betterAuth({ plugins: [configure(additionalFields, types)] })
   assertType<Concrete<typeof configuredAuth.api.sendNotification>>(true)
   assertType<Concrete<Parameters<typeof configuredAuth.api.sendNotification>[0]>>(true)
   // @ts-expect-error Generic configuration factories preserve closed kinds.
@@ -284,9 +294,11 @@ void client.notification.list({ query: {} }).then(({ data }) => {
     void amount; void input
   }
 })
+const hooks = view.unreadCount.get().data?.hook
+assertType<Equal<typeof hooks, 'completed' | 'failed' | 'skipped' | undefined>>(true)
 const state = client.useNotifications.get().data?.notifications[0]
 assertType<Concrete<typeof state>>(true)
-if (state?.schemaStatus === 'current' && state.type === 'post') { assertType<Equal<typeof state.slug, string>>(true); assertType<Equal<typeof state.amount, number | null>>(true); const slug: string = state.slug; void slug }
+if (state?.schemaStatus === 'current' && state.type === 'post') { assertType<Equal<typeof state.slug, string>>(true); const slug: string = state.slug; void slug }
 void client.notification.setRead({ id: 'one', read: true }).then((response) => { assertType<Concrete<typeof response>>(true) })
 void client.notification.deleteMany({ ids: ['one'] })
 // @ts-expect-error Trusted target APIs are not client endpoints.
@@ -316,9 +328,7 @@ void client.sendNotification({})
             join(directory, 'auth.ts'),
             `import { betterAuth } from 'better-auth'
 import { notification } from 'better-notif'
-export const auth = betterAuth({ plugins: [notification({ schema: { notification: { additionalFields: {
-    postId: { type: 'string', required: false }, score: { type: 'number', required: true },
-} } }, kinds: { post: { required: ['postId'] } } })] })
+export const auth = betterAuth({ plugins: [notification({ fields: { score: { type: 'number', required: true } }, types: { post: { fields: { postId: { type: 'string' } } } } })] })
 `,
         )
         run(

@@ -65,42 +65,38 @@ it('preserves declared string/date contracts through native storage and ordinary
     const transformed = vi.fn<(value: DBPrimitive) => DBPrimitive>((value) => value)
     const app = await setup(
         {
-            schema: {
-                notification: {
-                    additionalFields: {
-                        label: { type: 'string' },
-                        metadata: {
-                            type: 'json',
-                            validator: { input: metadataSchema, output: metadataSchema },
-                            transform: { output: transformed },
-                        },
-                        timestamps: { type: 'string[]' },
-                        dueAt: { type: 'date' },
-                        displayDate: {
-                            type: 'date',
-                            validator: { output: z.date().transform((date) => date.toISOString()) },
-                        },
-                        computedDate: {
-                            type: 'string',
-                            validator: {
-                                input: v.string(),
-                                output: v.pipe(
-                                    v.string(),
-                                    v.transform((value) => new Date(value)),
-                                ),
-                            },
-                        },
-                        summary: {
-                            type: 'json',
-                            validator: {
-                                input: z.object({ value: z.string() }),
-                                output: z.object({ value: z.string() }).transform((value) => value.value),
-                            },
-                        },
-                        optional: { type: 'date', required: false },
-                        freeform: { type: 'json', required: false },
+            fields: {
+                label: { type: 'string' },
+                metadata: {
+                    type: 'json',
+                    validator: { input: metadataSchema, output: metadataSchema },
+                    transform: { output: transformed },
+                },
+                timestamps: { type: 'string[]' },
+                dueAt: { type: 'date' },
+                displayDate: {
+                    type: 'date',
+                    validator: { output: z.date().transform((date) => date.toISOString()) },
+                },
+                computedDate: {
+                    type: 'string',
+                    validator: {
+                        input: v.string(),
+                        output: v.pipe(
+                            v.string(),
+                            v.transform((value) => new Date(value)),
+                        ),
                     },
                 },
+                summary: {
+                    type: 'json',
+                    validator: {
+                        input: z.object({ value: z.string() }),
+                        output: z.object({ value: z.string() }).transform((value) => value.value),
+                    },
+                },
+                optional: { type: 'date', required: false },
+                freeform: { type: 'json', required: false },
             },
         },
         ':memory:',
@@ -314,13 +310,7 @@ it('transports full 100-record lists and mutation results within the header boun
 })
 
 it('keeps legacy invalid date fields readable with their ordinary JSON null value', async () => {
-    const app = await setup({
-        schema: {
-            notification: {
-                additionalFields: { dueAt: { type: 'date', transform: { output: () => new Date(Number.NaN) } } },
-            },
-        },
-    })
+    const app = await setup({ fields: { dueAt: { type: 'date', transform: { output: () => new Date(Number.NaN) } } } })
     close.push(app.close)
     const user = await app.user()
     await app.auth.api.sendNotification({
@@ -352,7 +342,7 @@ it('keeps legacy invalid date fields readable with their ordinary JSON null valu
 
 it('reports completed mutation identities when application date fields exceed the metadata bound', async () => {
     const field = 'date'.repeat(1600)
-    const app = await setup({ schema: { notification: { additionalFields: { [field]: { type: 'date' } } } } })
+    const app = await setup({ fields: { [field]: { type: 'date' } } })
     close.push(app.close)
     const user = await app.user()
     const created = await app.auth.api.sendNotification({

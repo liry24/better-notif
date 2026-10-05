@@ -4,7 +4,7 @@ import type { Where } from '@better-auth/core/db/adapter'
 import { APIError } from 'better-auth/api'
 import * as z from 'zod'
 
-import type { NotificationFields, NotificationKinds, NotificationModel } from './fields'
+import type { NotificationFields, NotificationFieldsOf, NotificationTypes, NotificationModel } from './fields'
 import { identifier } from './schema'
 import type { NotificationListQuery } from './schema'
 import type { NotificationContext, NotificationList, StoredNotification } from './types'
@@ -81,14 +81,15 @@ async function pageRows(ctx: NotificationContext, where: Where[], limit: number,
     return [...tied, ...complete, ...boundaryRows]
 }
 
-export async function listNotifications<F extends NotificationFields, K extends NotificationKinds<F>>(
+export async function listNotifications<F extends NotificationFields, K extends NotificationTypes>(
     ctx: NotificationContext,
     model: NotificationModel<F, K>,
     userId: string,
-    query: NotificationListQuery<F>,
-): Promise<NotificationList<F, K>> {
+    query: NotificationListQuery<NotificationFieldsOf<F, K>>,
+    accessWhere: Where[] = [],
+): Promise<Omit<NotificationList<F, K>, 'hook'>> {
     const limit = query.limit ?? 20
-    const where = notificationWhere(userId, query, model)
+    const where = [...notificationWhere(userId, query, model), ...accessWhere]
     const [rows, total] = await Promise.all([
         pageRows(ctx, where, limit, query.cursor),
         ctx.adapter.count({ model: 'notification', where }),

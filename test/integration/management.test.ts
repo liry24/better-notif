@@ -9,7 +9,7 @@ afterEach(() => {
 
 it('scopes every client operation to its session and permits explicit trusted server targets', async () => {
     const readHook = vi.fn<() => void>()
-    const app = await setup({ onReadStateChanged: readHook })
+    const app = await setup({ hooks: { setRead: { after: readHook } } })
     cleanups.push(app.close)
     const a = await app.user()
     const b = await app.user()
@@ -135,7 +135,7 @@ it('bounds bulk processing, preserves cursor progress through deletions, and ret
 
 it('physically deletes records and allows the same idempotency key to create again', async () => {
     const hook = vi.fn<() => void>()
-    const app = await setup({ onNotificationCreated: hook })
+    const app = await setup({ hooks: { create: { after: hook } } })
     cleanups.push(app.close)
     const user = await app.user()
     const body = { recipients: [user.id], idempotencyKey: 'reuse', notification: content }

@@ -1,10 +1,13 @@
 /* oxlint-disable no-await-in-loop -- Bounded sequential writes keep hook and adapter load predictable. */
 import type { Where } from '@better-auth/core/db/adapter'
+import { APIError } from 'better-auth/api'
 import * as z from 'zod'
 
-import type { NotificationFields, NotificationFieldFilters, NotificationKinds, NotificationModel } from './fields'
+import type { NotificationFields, NotificationFieldFilters, NotificationTypes, NotificationModel } from './fields'
+import { serverActor } from './lifecycle'
 import { identifier } from './schema'
-import { setState } from './server'
+import { setState, deleteRecord } from './server'
+import type { NotificationActor } from './types'
 import type { HookStatus, Notification, NotificationContext, NotificationOptions, StoredNotification } from './types'
 
 const ids = z.array(identifier).min(1).max(100)
@@ -33,16 +36,17 @@ export type UserNotificationQuery<F extends NotificationFields = {}> = Omit<
 > & { filter?: NotificationFilter<F> }
 type Target = z.output<typeof userTargetSchema>
 
-export interface NotificationPage<F extends NotificationFields = {}, K extends NotificationKinds<F> = {}> {
+export interface NotificationPage<F extends NotificationFields = {}, K extends NotificationTypes = {}> {
     notifications: Notification<F, K>[]
     nextCursor: string | null
     hasMore: boolean
 }
-export type NotificationMutation<F extends NotificationFields = {}, K extends NotificationKinds<F> = {}> =
+export type NotificationMutation<F extends NotificationFields = {}, K extends NotificationTypes = {}> =
     | { id: string; status: 'updated' | 'unchanged'; notification: Notification<F, K>; hook: HookStatus }
-    | { id: string; status: 'deleted' | 'not_found' }
+    | { id: string; status: 'deleted'; hook: HookStatus }
+    | { id: string; status: 'not_found' }
     | { id: string; status: 'failed'; error: { code: string; message: string } }
-export interface NotificationBatchResult<F extends NotificationFields = {}, K extends NotificationKinds<F> = {}> {
+export interface NotificationBatchResult<F extends NotificationFields = {}, K extends NotificationTypes = {}> {
     results: NotificationMutation<F, K>[]
     nextCursor: string | null
     hasMore: boolean
@@ -62,7 +66,7 @@ function scope(target: Target, model: { filterWhere: (input: unknown) => Where[]
     return where
 }
 
-export async function listUserNotifications<F extends NotificationFields, K extends NotificationKinds<F>>(
+export async function listUserNotifications<F extends NotificationFields, K extends NotificationTypes>(
     ctx: NotificationContext,
     model: NotificationModel<F, K>,
     target: Target,
@@ -101,25 +105,13 @@ export async function unreadCount(
     }
 }
 
-export async function deleteNotification(ctx: NotificationContext, userId: string, id: string) {
-    return {
-        deleted:
-            (await ctx.adapter.deleteMany({
-                model: 'notification',
-                where: [
-                    { field: 'id', value: id },
-                    { field: 'userId', value: userId },
-                ],
-            })) > 0,
-    }
-}
-
-export async function mutateNotifications<TContext, F extends NotificationFields, K extends NotificationKinds<F>>(
+export async function mutateNotifications<TContext, F extends NotificationFields, K extends NotificationTypes>(
     ctx: NotificationContext,
     options: NotificationOptions<TContext, F, K>,
     model: NotificationModel<F, K>,
     target: Target,
     operation: { field: 'readAt' | 'archivedAt'; value: boolean } | { field: 'delete' },
+    actor: NotificationActor = { ...serverActor(), managed: true },
 ): Promise<NotificationBatchResult<F, K>> {
     const where = scope(target, model)
     // Explicit IDs also produce results for missing/foreign records without distinguishing them.
@@ -145,8 +137,13 @@ export async function mutateNotifications<TContext, F extends NotificationFields
         try {
             const ownedWhere: Where[] = [...where, { field: 'id', value: id }]
             if (operation.field === 'delete') {
-                const deleted = await ctx.adapter.deleteMany({ model: 'notification', where: ownedWhere })
-                results.push({ id, status: deleted ? 'deleted' : 'not_found' })
+                const row = await ctx.adapter.findOne<StoredNotification>({ model: 'notification', where: ownedWhere })
+                const result = row
+                    ? await deleteRecord(ctx, options, model, row.userId, id, where, actor)
+                    : { deleted: false, hook: 'skipped' as const }
+                results.push(
+                    result.deleted ? { id, status: 'deleted', hook: result.hook } : { id, status: 'not_found' },
+                )
                 continue
             }
             const row = await ctx.adapter.findOne<StoredNotification>({ model: 'notification', where: ownedWhere })
@@ -154,21 +151,32 @@ export async function mutateNotifications<TContext, F extends NotificationFields
                 results.push({ id, status: 'not_found' })
                 continue
             }
-            const result = await setState(ctx, options, model, row.userId, id, operation.field, operation.value, where)
+            const result = await setState(
+                ctx,
+                options,
+                model,
+                row.userId,
+                id,
+                operation.field,
+                operation.value,
+                where,
+                actor,
+            )
             results.push({
                 id,
                 status: result.changed ? 'updated' : 'unchanged',
                 notification: result.notification,
                 hook: result.hook,
             })
-        } catch {
-            ctx.logger.error('Notification batch item failed', { id })
+        } catch (error) {
+            const known = error instanceof APIError && error.body?.code?.startsWith('NOTIFICATION_')
+            if (!known) ctx.logger.error('Notification batch item failed', { id })
             results.push({
                 id,
                 status: 'failed',
                 error: {
-                    code: 'NOTIFICATION_MUTATION_FAILED',
-                    message: 'Notification operation failed; retry this ID',
+                    code: known ? error.body!.code! : 'NOTIFICATION_MUTATION_FAILED',
+                    message: known ? error.body!.message! : 'Notification operation failed; retry this ID',
                 },
             })
         }

@@ -91,16 +91,10 @@ import * as z from 'zod'
 import * as v from 'valibot'
 const database = new Database(':memory:')
 let createdHooks = 0
-const auth = betterAuth({ database, baseURL: 'http://localhost:3000', secret: 'runtime-notification-secret-more-than-thirty-two-characters', emailAndPassword: { enabled: true }, advanced: { disableOriginCheck: false, disableCSRFCheck: false }, logger: { disabled: true }, plugins: [notification({ schema: { notification: { additionalFields: {
-  amount: { type: 'number', required: false, validator: { input: z.string().transform(Number) } },
-  slug: { type: 'string', required: false, validator: { input: v.pipe(v.string(), v.trim()) } },
-  label: { type: 'string', required: false },
-  metadata: { type: 'json', required: false, validator: { input: z.object({ values: z.array(z.string()) }) } },
-  timestamps: { type: 'string[]', required: false },
-  dueAt: { type: 'date', required: false },
-  displayDate: { type: 'date', required: false, validator: { output: z.date().transform((date) => date.toISOString()) } },
-  computedDate: { type: 'string', required: false, validator: { output: v.pipe(v.string(), v.transform((value) => new Date(value))) } },
-} } }, kinds: { invoice: { required: ['amount'] }, post: { required: ['slug'] } }, filterableFields: ['amount', 'slug'], onNotificationCreated: ({ notification: item }) => { createdHooks++; if (item.type === 'invoice') assert.equal(item.amount, 42) } })] })
+let createAllowed = true
+let createChecks = 0
+let createBefore = 0
+const auth = betterAuth({ database, baseURL: 'http://localhost:3000', secret: 'runtime-notification-secret-more-than-thirty-two-characters', emailAndPassword: { enabled: true }, advanced: { disableOriginCheck: false, disableCSRFCheck: false }, logger: { disabled: true }, plugins: [notification({ fields: { label: { type: 'string', required: false }, metadata: { type: 'json', required: false, validator: { input: z.object({ values: z.array(z.string()) }) } }, timestamps: { type: 'string[]', required: false }, dueAt: { type: 'date', required: false }, displayDate: { type: 'date', required: false, validator: { output: z.date().transform((date) => date.toISOString()) } }, computedDate: { type: 'string', required: false, validator: { output: v.pipe(v.string(), v.transform((value) => new Date(value))) } } }, types: { invoice: { fields: { amount: { type: 'number', validator: { input: z.string().transform(Number) } } } }, post: { fields: { slug: { type: 'string', validator: { input: v.pipe(v.string(), v.trim()) } } } } }, list: { filters: ['amount', 'slug'] }, access: { create: () => { createChecks++; return createAllowed }, list: () => ({ where: [] }) }, hooks: { create: { before: () => { createBefore++ }, after: ({ record: item }) => { createdHooks++; if (item.type === 'invoice') assert.equal(item.amount, 42) } } } })] })
 await (await getMigrations(auth.options)).runMigrations()
 const registered = await auth.api.signUpEmail({ body: { name: 'Consumer', email: 'consumer@example.com', password: 'a-long-consumer-password' }, asResponse: true })
 assert.equal(registered.status, 200)
@@ -123,6 +117,13 @@ const post = (await auth.api.sendNotification({ body: { ...body, idempotencyKey:
 assert.equal(post.status, 'created')
 assert.equal(post.notification.slug, 'hello')
 assert.equal(createdHooks, 2)
+assert.equal(createBefore, 2)
+assert.equal(createChecks, 3)
+createAllowed = false
+assert.equal((await auth.api.sendNotification({ body })).results[0].error.code, 'NOTIFICATION_ACCESS_DENIED')
+assert.equal(createBefore, 2)
+assert.equal(createdHooks, 2)
+createAllowed = true
 const firstPage = await auth.api.listNotifications({ headers, query: { limit: 1 } })
 assert.equal(firstPage.total, 2)
 assert.equal(firstPage.hasMore, true)

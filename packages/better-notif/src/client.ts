@@ -7,13 +7,13 @@ import type { WritableAtom } from 'nanostores'
 import { createNotificationQuery } from './client-query'
 import type { NotificationQuery } from './client-query'
 import { notificationFetchPlugin } from './client-transport'
-import type { NotificationFields, NotificationKinds } from './fields'
+import type { NotificationFields, NotificationTypes, NotificationFieldsOf } from './fields'
 import type { notification } from './index'
 import type { NotificationListQuery } from './schema'
 
 export type { NotificationAction, NotificationListQuery } from './schema'
-export type { NotificationInput, NotificationFields, NotificationFieldFilters, NotificationKinds } from './fields'
-export type { HookStatus, Notification, NotificationList } from './types'
+export type { NotificationInput, NotificationFields, NotificationFieldFilters, NotificationTypes } from './fields'
+export type { HookStatus, Notification, NotificationList, NotificationCount } from './types'
 export type { NotificationQuery } from './client-query'
 
 type DefaultAuth = { options: { plugins: [ReturnType<typeof notification<undefined, {}, {}>>] } }
@@ -23,13 +23,13 @@ type ServerPlugin<A extends { options: BetterAuthOptions }> = Extract<
 >
 type FieldsOf<A extends { options: BetterAuthOptions }> =
     ServerPlugin<A> extends {
-        options: { schema?: { notification?: { additionalFields?: infer F extends NotificationFields } } }
+        options: { fields?: infer F extends NotificationFields }
     }
         ? F
         : {}
 type KindsOf<A extends { options: BetterAuthOptions }> =
     ServerPlugin<A> extends {
-        options: { kinds?: infer K extends NotificationKinds<FieldsOf<A>> }
+        options: { types?: infer K extends NotificationTypes }
     }
         ? K
         : {}
@@ -56,8 +56,10 @@ interface NotificationClientPlugin<A extends { options: BetterAuthOptions }> {
         store: ClientStore,
     ) => {
         notification: {
-            refetch: (nextQuery?: NotificationListQuery<FieldsOf<A>>) => Promise<void>
-            createQuery: (query?: NotificationListQuery<FieldsOf<A>>) => NotificationQuery<FieldsOf<A>, KindsOf<A>>
+            refetch: (nextQuery?: NotificationListQuery<NotificationFieldsOf<FieldsOf<A>, KindsOf<A>>>) => Promise<void>
+            createQuery: (
+                query?: NotificationListQuery<NotificationFieldsOf<FieldsOf<A>, KindsOf<A>>>,
+            ) => NotificationQuery<FieldsOf<A>, KindsOf<A>>
         }
     }
     atomListeners: { matcher: (path: string) => boolean; signal: '$notificationSignal' }[]
@@ -115,11 +117,13 @@ export function notificationClient<
             })
             return {
                 notification: {
-                    async refetch(nextQuery?: NotificationListQuery<F>) {
+                    async refetch(nextQuery?: NotificationListQuery<NotificationFieldsOf<F, K>>) {
                         if (nextQuery) defaults.replace(nextQuery)
                         await defaults.api.refetch()
                     },
-                    createQuery(query: NotificationListQuery<F> = {}): NotificationQuery<F, K> {
+                    createQuery(
+                        query: NotificationListQuery<NotificationFieldsOf<F, K>> = {},
+                    ): NotificationQuery<F, K> {
                         const view = createNotificationQuery<F, K>($fetch, signal, epoch, query, () => {
                             views.delete(view)
                         })

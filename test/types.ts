@@ -1,4 +1,3 @@
-import type { DBFieldAttribute } from '@better-auth/core/db'
 import { betterAuth } from 'better-auth'
 import { createAuthClient } from 'better-auth/client'
 import { createAuthClient as reactClient } from 'better-auth/react'
@@ -8,7 +7,7 @@ import * as z from 'zod'
 
 import { notificationClient } from '../packages/better-notif/src/client'
 import { notification } from '../packages/better-notif/src/index'
-import type { NotificationFields, NotificationInput, NotificationKinds } from '../packages/better-notif/src/index'
+import type { NotificationFields, NotificationInput, NotificationTypes } from '../packages/better-notif/src/index'
 
 type IsAny<T> = 0 extends 1 & T ? true : false
 type Concrete<T> = IsAny<T> extends true ? false : unknown extends T ? false : true
@@ -17,8 +16,8 @@ type Equal<T, U> = (<V>() => V extends T ? 1 : 2) extends <V>() => V extends U ?
 function assertType<T extends true>(proof: T) {
     return proof
 }
-function configure<const F extends NotificationFields, const K extends NotificationKinds<F>>(fields: F, kinds: K) {
-    return notification({ schema: { notification: { additionalFields: fields } }, kinds })
+function configure<const F extends NotificationFields, const K extends NotificationTypes>(fields: F, types: K) {
+    return notification({ fields, types })
 }
 
 const auth = betterAuth({ plugins: [notification({ loadContext: () => ({ organizationIds: ['org-1'] }) })] })
@@ -26,45 +25,92 @@ const client = createAuthClient({ plugins: [notificationClient()] })
 const react = reactClient({ plugins: [notificationClient()] })
 const vue = vueClient({ plugins: [notificationClient()] })
 const fields = {
-    amount: { type: 'number', required: false, validator: { input: z.string().transform(Number) } },
-    slug: { type: 'string', required: false, validator: { input: v.string() } },
     hidden: { type: 'string', returned: false, input: false, defaultValue: 'internal' },
     priority: { type: 'number', defaultValue: 1 },
     source: { type: 'string' },
+    nativeAmount: {
+        type: 'number',
+        required: false,
+        validate: z.string(),
+        transform: { input: (value) => (value === null ? null : Number(value)) },
+    },
     summary: { type: 'string', required: false, validator: { output: z.string().transform((value) => value.length) } },
-} as const satisfies Record<string, DBFieldAttribute>
-const kinds = { invoice: { required: ['amount'] }, post: { required: ['slug'] } } as const
+} as const satisfies NotificationFields
+const types = {
+    invoice: { fields: { amount: { type: 'number', validate: z.string().transform(Number) } } },
+    post: { fields: { slug: { type: 'string', validate: v.string() } } },
+} as const satisfies NotificationTypes
 const typedAuth = betterAuth({
     plugins: [
         notification({
-            schema: { notification: { additionalFields: fields } },
-            kinds,
-            filterableFields: ['amount', 'slug'],
+            fields,
+            types,
+            list: { filters: ['amount', 'slug'] },
             loadContext: () => ({ organizationId: 'org' }),
-            onNotificationCreated({ notification: item, recipient }) {
-                assertType<Concrete<typeof item>>(true)
-                assertType<Concrete<typeof recipient>>(true)
-                assertType<Equal<typeof recipient.context, { organizationId: string } | undefined>>(true)
-                recipient.context?.organizationId.toUpperCase()
-                if (item.schemaStatus === 'current' && item.type === 'invoice') {
-                    assertType<Equal<typeof item.amount, number>>(true)
-                    assertType<Equal<typeof item.summary, number | null>>(true)
-                    item.amount.toFixed()
-                    item.slug?.toUpperCase()
-                    // @ts-expect-error Hooks receive transformed numbers.
-                    item.amount.toUpperCase()
-                }
-                if (item.schemaStatus === 'current' && item.type === 'post') {
-                    item.slug.toUpperCase()
-                    // @ts-expect-error A field required only by another kind is nullable here.
-                    item.amount.toFixed()
-                }
-                // @ts-expect-error Private fields are omitted from public results and callbacks.
-                void item.hidden
+            access: {
+                create: ({ changes, record, recipient, session, headers }) => {
+                    assertType<Concrete<typeof changes>>(true)
+                    assertType<Concrete<typeof record>>(true)
+                    assertType<
+                        Equal<typeof session, import('../packages/better-notif/src/index').NotificationSession | null>
+                    >(true)
+                    assertType<Equal<typeof headers, Headers>>(true)
+                    if (changes.type === 'invoice') {
+                        assertType<Equal<typeof changes.amount, number>>(true)
+                        changes.amount.toFixed()
+                    }
+                    assertType<Equal<typeof recipient.context, { organizationId: string } | undefined>>(true)
+                    return true
+                },
+                list: () => ({ where: [{ field: 'amount', operator: 'gte', value: 0 }] }),
+                setRead: ({ changes, record }) => {
+                    assertType<Equal<typeof changes.readAt, Date | null>>(true)
+                    assertType<Concrete<typeof record>>(true)
+                    return true
+                },
             },
-            onReadStateChanged({ readAt, userId }) {
-                assertType<Equal<typeof readAt, Date | null>>(true)
-                assertType<Equal<typeof userId, string>>(true)
+            hooks: {
+                create: {
+                    before: ({ changes, record, previous }) => {
+                        assertType<Equal<typeof previous, null>>(true)
+                        assertType<Equal<typeof changes.summary, string | null>>(true)
+                        assertType<Equal<typeof changes.nativeAmount, string | null>>(true)
+                        assertType<Concrete<typeof record>>(true)
+                        if (changes.type === 'invoice') {
+                            assertType<Equal<typeof changes.amount, number>>(true)
+                            changes.amount.toFixed()
+                        }
+                    },
+                    after: ({ record: item, recipient }) => {
+                        assertType<Concrete<typeof item>>(true)
+                        assertType<Concrete<typeof recipient>>(true)
+                        assertType<Equal<typeof recipient.context, { organizationId: string } | undefined>>(true)
+                        recipient.context?.organizationId.toUpperCase()
+                        if (item.schemaStatus === 'current' && item.type === 'invoice') {
+                            assertType<Equal<typeof item.amount, number>>(true)
+                            assertType<Equal<typeof item.summary, number | null>>(true)
+                            assertType<Equal<typeof item.nativeAmount, number | null>>(true)
+                            item.amount.toFixed()
+                            // @ts-expect-error Fields of another type are absent.
+                            item.slug?.toUpperCase()
+                            // @ts-expect-error Hooks receive transformed numbers.
+                            item.amount.toUpperCase()
+                        }
+                        if (item.schemaStatus === 'current' && item.type === 'post') {
+                            item.slug.toUpperCase()
+                            // @ts-expect-error Fields of another type are absent.
+                            item.amount.toFixed()
+                        }
+                        // @ts-expect-error Private fields are omitted from public results and callbacks.
+                        void item.hidden
+                    },
+                },
+                setRead: {
+                    after: ({ changes: { readAt }, userId }) => {
+                        assertType<Equal<typeof readAt, Date | null>>(true)
+                        assertType<Equal<typeof userId, string>>(true)
+                    },
+                },
             },
         }),
     ],
@@ -72,9 +118,9 @@ const typedAuth = betterAuth({
 const typedClient = createAuthClient({ plugins: [notificationClient<typeof typedAuth>()] })
 const typedReact = reactClient({ plugins: [notificationClient<typeof typedAuth>()] })
 const typedVue = vueClient({ plugins: [notificationClient<typeof typedAuth>()] })
-type Input = NotificationInput<typeof fields, typeof kinds>
+type Input = NotificationInput<typeof fields, typeof types>
 type GenericClientPlugin = ReturnType<typeof notificationClient>
-const configuredAuth = betterAuth({ plugins: [configure(fields, kinds)] })
+const configuredAuth = betterAuth({ plugins: [configure(fields, types)] })
 
 export async function schemaTypeContracts() {
     assertType<Concrete<typeof notification>>(true)
@@ -170,7 +216,8 @@ export async function schemaTypeContracts() {
     const clientItem = response.data?.notifications[0]
     if (clientItem?.schemaStatus === 'current' && clientItem.type === 'post') {
         assertType<Equal<typeof clientItem.slug, string>>(true)
-        assertType<Equal<typeof clientItem.amount, number | null>>(true)
+        // @ts-expect-error An invoice field is absent from post results.
+        void clientItem.amount
         assertType<Equal<typeof clientItem.summary, number | null>>(true)
         clientItem.slug.toUpperCase()
     }
@@ -244,4 +291,23 @@ export function typeContracts() {
     reactState.data?.notifications[0]?.actions[0]?.href?.toUpperCase()
     vueState.value.data?.notifications[0]?.title.toUpperCase()
     return { reactState, vueState }
+}
+
+export function callbackTypeContracts() {
+    notification({
+        access: { create: () => true, setRead: async () => false, list: async () => ({ where: [] }) },
+        hooks: { create: { before: () => {}, after: async () => {} } },
+    })
+    // @ts-expect-error Access requires an explicit Boolean decision.
+    notification({ access: { create: () => {} } })
+    // @ts-expect-error Mutation access requires a Boolean, rather than an arbitrary value.
+    notification({ access: { setRead: () => 'allow' } })
+    // @ts-expect-error List access requires false or a declarative scope.
+    notification({ access: { list: () => true } })
+    // @ts-expect-error Lifecycle callbacks cannot return Boolean authorization decisions.
+    notification({ hooks: { create: { before: () => false } } })
+    // @ts-expect-error Async lifecycle callbacks cannot return Boolean authorization decisions.
+    notification({ hooks: { setRead: { before: async () => false } } })
+    // @ts-expect-error Native storage types remain explicit.
+    notification({ types: { post: { fields: { postId: { validate: z.string() } } } } })
 }

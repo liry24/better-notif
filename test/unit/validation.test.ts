@@ -8,12 +8,8 @@ import type { StoredNotification } from '../../packages/better-notif/src/types'
 it('marks absent and null globally required output fields as legacy in retained records', async () => {
     const model = createNotificationModel(
         {
-            notification: {
-                additionalFields: {
-                    name: { type: 'string', validator: { output: z.string() } },
-                    optional: { type: 'string', required: false, validator: { output: z.string() } },
-                },
-            },
+            name: { type: 'string', validator: { output: z.string() } },
+            optional: { type: 'string', required: false, validator: { output: z.string() } },
         },
         undefined,
     )

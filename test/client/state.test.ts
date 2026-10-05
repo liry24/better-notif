@@ -139,7 +139,7 @@ it('refreshes shared state after batch updates and deletion', async () => {
     await vi.waitFor(() => expect(count.get().data?.count).toBe(0))
     await client.notification.refetch({ archived: 'all' })
     expect(list.get().data?.notifications).toHaveLength(2)
-    expect((await client.notification.delete({ id: ids[0]! })).data).toEqual({ deleted: true })
+    expect((await client.notification.delete({ id: ids[0]! })).data).toEqual({ deleted: true, hook: 'skipped' })
     await vi.waitFor(() => expect(list.get().data?.notifications).toHaveLength(1))
     expect((await client.notification.deleteMany({ ids })).error).toBeNull()
     await vi.waitFor(() => expect(list.get().data?.notifications).toHaveLength(0))

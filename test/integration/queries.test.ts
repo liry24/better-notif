@@ -1,3 +1,4 @@
+type NotificationCreateHook = NonNullable<NonNullable<NonNullable<NotificationOptions['hooks']>['create']>['after']>
 import { APIError, createAuthMiddleware, getSessionFromCtx } from 'better-auth/api'
 import { afterEach, expect, it, vi } from 'vite-plus/test'
 
@@ -12,16 +13,12 @@ afterEach(() => {
 
 it('filters before paging, counts the complete result, and traverses timestamp ties without duplicates', async () => {
     const app = await setup({
-        schema: {
-            notification: {
-                modelName: 'message',
-                additionalFields: {
-                    topic: { type: 'string', required: false, fieldName: 'topic_code' },
-                    privateNote: { type: 'string', returned: false, input: false, defaultValue: 'internal' },
-                },
-            },
+        fields: {
+            topic: { type: 'string', required: false, fieldName: 'topic_code' },
+            privateNote: { type: 'string', returned: false, input: false, defaultValue: 'internal' },
         },
-        filterableFields: ['topic'],
+        schema: { modelName: 'message' },
+        list: { filters: ['topic'] },
     })
     cleanups.push(app.close)
     const owner = await app.user()
@@ -52,6 +49,7 @@ it('filters before paging, counts the complete result, and traverses timestamp t
     const fields = { topic: 'alpha' }
     expect(await app.auth.api.getUnreadNotificationCount({ headers: owner.headers, query: { fields } })).toEqual({
         count: 7,
+        hook: 'skipped',
     })
     const url = '/notification/list?read=unread&limit=2&fields=' + encodeURIComponent(JSON.stringify(fields))
     const first = await (await app.request(url, owner.headers)).json()
@@ -78,6 +76,7 @@ it('filters before paging, counts the complete result, and traverses timestamp t
     expect(changed.results).toHaveLength(6)
     expect(await app.auth.api.getUnreadNotificationCount({ headers: owner.headers, query: { fields } })).toEqual({
         count: 0,
+        hook: 'skipped',
     })
     expect(
         await app.auth.api.getUserUnreadNotificationCount({
@@ -86,20 +85,17 @@ it('filters before paging, counts the complete result, and traverses timestamp t
     ).toEqual({ count: 30 })
     expect(await app.auth.api.getUnreadNotificationCount({ headers: foreign.headers, query: { fields } })).toEqual({
         count: 1,
+        hook: 'skipped',
     })
 })
 
 it('rejects unknown, private, complex and transformed filter fields and malformed cursors', async () => {
     const app = await setup({
-        schema: {
-            notification: {
-                additionalFields: {
-                    topic: { type: 'string', required: false },
-                    hidden: { type: 'string', returned: false, required: false },
-                },
-            },
+        fields: {
+            topic: { type: 'string', required: false },
+            hidden: { type: 'string', returned: false, required: false },
         },
-        filterableFields: ['topic'],
+        list: { filters: ['topic'] },
     })
     cleanups.push(app.close)
     const owner = await app.user()
@@ -114,12 +110,9 @@ it('rejects unknown, private, complex and transformed filter fields and malforme
         { type: 'json' },
         { type: 'string', transform: { input: (value: unknown) => value } },
     ]) {
-        expect(() =>
-            notification({
-                schema: { notification: { additionalFields: { field } } },
-                filterableFields: ['field'],
-            } as any),
-        ).toThrow('cannot be filtered')
+        expect(() => notification({ fields: { field }, list: { filters: ['field'] } } as any)).toThrow(
+            'cannot be filtered',
+        )
     }
 })
 
@@ -132,8 +125,8 @@ it('loads related recipient data only for callbacks, after a successful write fo
         body: { recipients: [owner.id], idempotencyKey: 'plain', notification: content },
     })
     expect(related.mock.calls.some(([query]) => query.model === 'account' || query.model === 'session')).toBe(false)
-    const hook = vi.fn<NonNullable<NotificationOptions['onNotificationCreated']>>()
-    const app = await setup({ onNotificationCreated: hook })
+    const hook = vi.fn<NonNullable<NotificationCreateHook>>()
+    const app = await setup({ hooks: { create: { after: hook } } })
     cleanups.push(app.close)
     const user = await app.signUp()
     const findMany = app.ctx.adapter.findMany.bind(app.ctx.adapter)

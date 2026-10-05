@@ -1,3 +1,8 @@
+type NotificationCreateHook = NonNullable<NonNullable<NonNullable<NotificationOptions['hooks']>['create']>['after']>
+type NotificationReadHook = NonNullable<NonNullable<NonNullable<NotificationOptions['hooks']>['setRead']>['after']>
+type NotificationArchiveHook = NonNullable<
+    NonNullable<NonNullable<NotificationOptions['hooks']>['setArchived']>['after']
+>
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -14,10 +19,16 @@ afterEach(async () => {
 
 describe('notification plugin against real SQLite', () => {
     it('sends, lists, changes independent states, and calls hooks only on actual changes', async () => {
-        const onNotificationCreated = vi.fn<NonNullable<NotificationOptions['onNotificationCreated']>>()
-        const onReadStateChanged = vi.fn<NonNullable<NotificationOptions['onReadStateChanged']>>()
-        const onArchiveStateChanged = vi.fn<NonNullable<NotificationOptions['onArchiveStateChanged']>>()
-        const app = await setup({ onNotificationCreated, onReadStateChanged, onArchiveStateChanged })
+        const onNotificationCreated = vi.fn<NonNullable<NotificationCreateHook>>()
+        const onReadStateChanged = vi.fn<NonNullable<NotificationReadHook>>()
+        const onArchiveStateChanged = vi.fn<NonNullable<NotificationArchiveHook>>()
+        const app = await setup({
+            hooks: {
+                create: { after: onNotificationCreated },
+                setRead: { after: onReadStateChanged },
+                setArchived: { after: onArchiveStateChanged },
+            },
+        })
         cleanups.push(app.close)
         const user = await app.user()
         const send = await app.auth.api.sendNotification({
@@ -35,6 +46,7 @@ describe('notification plugin against real SQLite', () => {
 
         expect(await app.auth.api.getUnreadNotificationCount({ headers: user.headers })).toEqual({
             count: 1,
+            hook: 'skipped',
         })
         const list = await app.request('/notification/list', user.headers)
         expect(list.headers.get('cache-control')).toContain('no-store')
@@ -48,6 +60,7 @@ describe('notification plugin against real SQLite', () => {
         })
         expect(await app.auth.api.getUnreadNotificationCount({ headers: user.headers })).toEqual({
             count: 0,
+            hook: 'skipped',
         })
         expect((await app.auth.api.listNotifications({ headers: user.headers, query: {} })).total).toBe(0)
         expect(
@@ -84,6 +97,7 @@ describe('notification plugin against real SQLite', () => {
         expect(onReadStateChanged).toHaveBeenCalledTimes(2)
         expect(await app.auth.api.getUnreadNotificationCount({ headers: user.headers })).toEqual({
             count: 1,
+            hook: 'skipped',
         })
     })
 
@@ -145,20 +159,14 @@ describe('notification plugin against real SQLite', () => {
         const directory = await mkdtemp(join(tmpdir(), 'notification-'))
         cleanups.push(() => rm(directory, { recursive: true, force: true }))
         const filename = join(directory, 'auth.db')
-        const hook = vi.fn<NonNullable<NotificationOptions['onNotificationCreated']>>()
+        const hook = vi.fn<NonNullable<NotificationCreateHook>>()
         const first = await setup(
-            {
-                onNotificationCreated: hook,
-                schema: { notification: { additionalFields: { data: { type: 'json', required: false } } } },
-            },
+            { fields: { data: { type: 'json', required: false } }, hooks: { create: { after: hook } } },
             filename,
         )
         cleanups.push(first.close)
         const second = await setup(
-            {
-                onNotificationCreated: hook,
-                schema: { notification: { additionalFields: { data: { type: 'json', required: false } } } },
-            },
+            { fields: { data: { type: 'json', required: false } }, hooks: { create: { after: hook } } },
             filename,
         )
         cleanups.push(second.close)
@@ -182,10 +190,7 @@ describe('notification plugin against real SQLite', () => {
         first.close()
         second.close()
         const restarted = await setup(
-            {
-                onNotificationCreated: hook,
-                schema: { notification: { additionalFields: { data: { type: 'json', required: false } } } },
-            },
+            { fields: { data: { type: 'json', required: false } }, hooks: { create: { after: hook } } },
             filename,
         )
         cleanups.push(restarted.close)
@@ -208,9 +213,7 @@ describe('notification plugin against real SQLite', () => {
             throw new Error('provider credential must stay private')
         })
         const app = await setup({
-            onNotificationCreated: failing,
-            onReadStateChanged: failing,
-            onArchiveStateChanged: failing,
+            hooks: { create: { after: failing }, setRead: { after: failing }, setArchived: { after: failing } },
         })
         cleanups.push(app.close)
         const user = await app.user()

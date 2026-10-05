@@ -5,26 +5,26 @@ import { useAuthQuery } from 'better-auth/client'
 import type { AuthQueryAtom } from 'better-auth/client'
 import type { WritableAtom } from 'nanostores'
 
-import type { NotificationFields, NotificationKinds } from './fields'
+import type { NotificationFields, NotificationTypes, NotificationFieldsOf } from './fields'
 import type { NotificationListQuery } from './schema'
-import type { NotificationList } from './types'
+import type { NotificationList, NotificationCount } from './types'
 
 type ClientFetch = Parameters<NonNullable<BetterAuthClientPlugin['getAtoms']>>[0]
-export interface NotificationQuery<F extends NotificationFields = {}, K extends NotificationKinds<F> = {}> {
+export interface NotificationQuery<F extends NotificationFields = {}, K extends NotificationTypes = {}> {
     readonly key: string
     readonly notifications: AuthQueryAtom<NotificationList<F, K>>
-    readonly unreadCount: AuthQueryAtom<{ count: number }>
+    readonly unreadCount: AuthQueryAtom<NotificationCount>
     refetch: () => Promise<void>
     nextPage: () => Promise<void>
     resetPage: () => Promise<void>
     dispose: () => void
 }
 
-export function createNotificationQuery<F extends NotificationFields, K extends NotificationKinds<F>>(
+export function createNotificationQuery<F extends NotificationFields, K extends NotificationTypes>(
     $fetch: ClientFetch,
     signal: WritableAtom<boolean>,
     epoch: WritableAtom<number>,
-    initial: NotificationListQuery<F>,
+    initial: NotificationListQuery<NotificationFieldsOf<F, K>>,
     onDispose: () => void = () => {},
 ) {
     let query = structuredClone(initial)
@@ -55,7 +55,7 @@ export function createNotificationQuery<F extends NotificationFields, K extends 
         method: 'GET',
         query: { ...query, ...encodeFields(), cursor },
     }))
-    const unreadCount = useAuthQuery<{ count: number }>(signal, '/notification/unread-count', scopedFetch, () => ({
+    const unreadCount = useAuthQuery<NotificationCount>(signal, '/notification/unread-count', scopedFetch, () => ({
         method: 'GET',
         query: { type: query.type, archived: query.archived, ...encodeFields() },
     }))
@@ -113,7 +113,7 @@ export function createNotificationQuery<F extends NotificationFields, K extends 
             cursor = undefined
             reset()
         },
-        replace(next: NotificationListQuery<F>) {
+        replace(next: NotificationListQuery<NotificationFieldsOf<F, K>>) {
             query = structuredClone(next)
             cursor = query.cursor
             reset()

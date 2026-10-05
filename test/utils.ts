@@ -6,7 +6,7 @@ import { getMigrations } from 'better-auth/db/migration'
 import { testUtils } from 'better-auth/plugins'
 
 import { notification } from '../packages/better-notif/src/index'
-import type { NotificationOptions, NotificationFields, NotificationKinds } from '../packages/better-notif/src/index'
+import type { NotificationOptions, NotificationFields, NotificationTypes } from '../packages/better-notif/src/index'
 
 function fixtureTestUtils() {
     const plugin = testUtils()
@@ -23,7 +23,7 @@ function fixtureTestUtils() {
 export async function setup<
     TContext = undefined,
     const F extends NotificationFields = {},
-    const K extends NotificationKinds<F> = {},
+    const K extends NotificationTypes = {},
 >(
     options: NotificationOptions<TContext, F, K> = {},
     filename = ':memory:',
