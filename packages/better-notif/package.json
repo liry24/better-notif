@@ -1,13 +1,13 @@
 {
-    "name": "better-auth-notification",
-    "version": "0.1.0",
+    "name": "better-notif",
+    "version": "0.0.0",
     "description": "User notifications, read state, archiving, and delivery hooks for Better Auth",
-    "homepage": "https://github.com/liry24/better-auth-notification#readme",
+    "homepage": "https://github.com/liry24/better-notif#readme",
     "license": "MIT",
     "repository": {
         "type": "git",
-        "url": "git+https://github.com/liry24/better-auth-notification.git",
-        "directory": "packages/better-auth-notification"
+        "url": "git+https://github.com/liry24/better-notif.git",
+        "directory": "packages/better-notif"
     },
     "files": [
         "dist"
@@ -34,13 +34,14 @@
         "provenance": true
     },
     "scripts": {
-        "build": "tsdown",
-        "dev": "tsdown --watch",
-        "prepack": "bun run build",
+        "build": "vp pack",
+        "dev": "vp pack --watch",
+        "prepack": "vp pack",
         "typecheck": "tsc --noEmit"
     },
     "dependencies": {
         "@better-fetch/fetch": "^1.3.2",
+        "@standard-schema/spec": "^1.0.0",
         "better-call": "^1.4.0",
         "nanostores": "^1.3.0",
         "zod": "^4.5.4"
@@ -49,14 +50,14 @@
         "@arethetypeswrong/cli": "^0.18.5",
         "@types/node": "^26.6.3",
         "publint": "^0.3.24",
-        "tsdown": "^0.23.0",
-        "typescript": "^7.0.2"
+        "typescript": "^7.0.2",
+        "vite-plus": "catalog:"
     },
     "peerDependencies": {
-        "@better-auth/core": ">=1.7.7 <1.8.0",
-        "better-auth": ">=1.7.7 <1.8.0"
+        "@better-auth/core": "^1.7.0",
+        "better-auth": "^1.7.0"
     },
     "engines": {
-        "node": ">=24.0.0"
+        "node": ">=22.0.0"
     }
 }

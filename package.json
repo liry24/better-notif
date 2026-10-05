@@ -1,49 +1,60 @@
 {
-    "name": "better-auth-notification-workspace",
+    "name": "better-notif-workspace",
     "private": true,
     "workspaces": [
         "packages/*"
     ],
     "type": "module",
     "scripts": {
-        "build": "bun --filter better-auth-notification build",
-        "check": "bun run format:check && bun run lint && bun run workspace:check && bun run unused && bun run typecheck && bun run build && bun run test",
-        "deps:update": "taze",
-        "dev": "bun --filter better-auth-notification dev",
-        "format": "oxfmt . --write",
-        "format:check": "oxfmt . --check",
-        "lint": "oxlint .",
-        "lint:fix": "oxlint . --fix",
-        "preview:package": "pkg-pr-new publish ./packages/better-auth-notification --bun --compact --previewVersion",
-        "test": "vitest run",
-        "test:unit": "vitest run --project unit",
-        "test:integration": "vitest run --project integration",
-        "test:client": "vitest run --project client",
-        "test:consumer": "vitest run --project consumer",
-        "typecheck": "bun --filter better-auth-notification typecheck && tsc --noEmit -p test/tsconfig.json",
+        "build": "vp -C packages/better-notif pack",
+        "check": "vp check && vp run workspace:check && vp run unused && vp run typecheck && vp run build && vp test",
+        "deps:update": "vp update --latest",
+        "dev": "vp -C packages/better-notif pack --watch",
+        "format": "vp fmt . --write",
+        "format:check": "vp fmt . --check",
+        "lint": "vp lint .",
+        "lint:fix": "vp lint . --fix",
+        "preview:package": "pkg-pr-new publish ./packages/better-notif --bun --compact --previewVersion",
+        "test": "vp test run",
+        "test:unit": "vp test run --project unit",
+        "test:integration": "vp test run --project integration",
+        "test:client": "vp test run --project client",
+        "test:consumer": "vp test run --project consumer",
+        "test:runtime": "node test/runtime/packed.mjs",
+        "typecheck": "tsc --noEmit -p packages/better-notif/tsconfig.json && tsc --noEmit -p test/tsconfig.json",
         "unused": "knip && knip --production",
         "workspace:check": "sherif"
     },
     "devDependencies": {
+        "@better-auth/core": "1.7.0",
         "@types/node": "^26.6.3",
         "@types/react": "^19.2.0",
         "@types/react-dom": "^19.2.0",
-        "better-auth": "1.7.7",
+        "better-auth": "1.7.0",
         "knip": "^6.38.0",
-        "oxfmt": "^0.71.0",
-        "oxlint": "^1.86.0",
-        "oxlint-tsgolint": "^7.0.2003",
         "pkg-pr-new": "^0.0.88",
         "react": "^19.2.0",
         "react-dom": "^19.2.0",
         "sherif": "^1.13.0",
-        "taze": "^21.2.0",
         "typescript": "^7.0.2",
-        "vitest": "^5.0.2",
-        "vue": "^3.5.43"
+        "valibot": "^1.5.0",
+        "vite": "catalog:",
+        "vite-plus": "catalog:",
+        "vitest": "catalog:",
+        "vue": "^3.5.43",
+        "zod": "^4.5.4"
+    },
+    "overrides": {
+        "vite": "catalog:",
+        "vitest": "catalog:"
     },
     "engines": {
-        "node": ">=24.0.0"
+        "node": "^22.18.0 || ^24.11.0 || >=26.0.0"
     },
-    "packageManager": "bun@1.4.2"
+    "packageManager": "bun@1.4.2",
+    "catalog": {
+        "vite": "npm:@voidzero-dev/vite-plus-core@1.0.0",
+        "vitest": "5.0.1",
+        "vite-plus": "1.0.0"
+    }
 }

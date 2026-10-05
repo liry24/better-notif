@@ -6,9 +6,9 @@
             "entry": ["*.config.ts", "test/**/*.test.ts", "test/types.ts"],
             "project": ["*.ts", "test/**/*.ts"]
         },
-        "packages/better-auth-notification": {
-            "entry": ["src/{index,client}.ts"],
-            "ignoreDependencies": ["@arethetypeswrong/cli", "better-call"],
+        "packages/better-notif": {
+            "entry": ["src/{index,client}.ts!"],
+            "ignoreDependencies": ["@arethetypeswrong/cli", "publint"],
             "project": ["src/**/*.ts!", "*.config.ts"]
         }
     }

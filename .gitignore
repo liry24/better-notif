@@ -4,5 +4,6 @@ coverage
 .data
 .consumer-*
 *.tgz
-packages/better-auth-notification/README.md
-packages/better-auth-notification/LICENSE
+packages/better-notif/README.md
+packages/better-notif/LICENSE
+.vitest/

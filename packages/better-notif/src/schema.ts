@@ -1,6 +1,8 @@
 import type { BetterAuthPluginDBSchema } from '@better-auth/core/db'
 import * as z from 'zod'
 
+import type { NotificationFields, NotificationFieldFilters } from './fields'
+
 export const identifier = z.string().min(1).max(256)
 
 function isSafeHref(value: string) {
@@ -26,7 +28,6 @@ export const contentSchema = z.object({
     type: z.string().min(1).max(100),
     title: z.string().min(1).max(500),
     body: z.string().max(10_000).nullable().default(null),
-    data: z.record(z.string(), z.json()).default({}),
     actions: z
         .array(actionSchema)
         .max(10)
@@ -37,9 +38,10 @@ export const contentSchema = z.object({
         ),
 })
 
-export const listQuerySchema = z.object({
+export const listQuerySchema = z.strictObject({
     limit: z.coerce.number<number>().int().min(1).max(100).default(20),
-    offset: z.coerce.number<number>().int().min(0).max(Number.MAX_SAFE_INTEGER).default(0),
+    cursor: z.string().min(1).max(1024).optional(),
+    type: z.string().min(1).max(100).optional(),
     read: z.enum(['all', 'read', 'unread']).default('all'),
     archived: z.enum(['all', 'archived', 'unarchived']).default('unarchived'),
 })
@@ -52,7 +54,7 @@ export const schema = {
             type: { type: 'string', required: true },
             title: { type: 'string', required: true },
             body: { type: 'string', required: false },
-            data: { type: 'json', required: true },
+            contentHash: { type: 'string', required: false, returned: false },
             actions: { type: 'json', required: true },
             createdAt: { type: 'date', required: true },
             readAt: { type: 'date', required: false },
@@ -63,6 +65,8 @@ export const schema = {
 } satisfies BetterAuthPluginDBSchema
 
 export type NotificationAction = z.infer<typeof actionSchema>
-export type NotificationInput = z.input<typeof contentSchema>
-export type NotificationContent = z.output<typeof contentSchema>
-export type NotificationListQuery = z.input<typeof listQuerySchema>
+export type BaseInput = z.input<typeof contentSchema>
+export type BaseContent = z.output<typeof contentSchema>
+export type NotificationListQuery<F extends NotificationFields = {}> = z.input<typeof listQuerySchema> & {
+    fields?: NotificationFieldFilters<F> | undefined
+}

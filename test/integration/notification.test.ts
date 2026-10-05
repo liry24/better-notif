@@ -1,10 +1,15 @@
+type NotificationCreateHook = NonNullable<NonNullable<NonNullable<NotificationOptions['hooks']>['create']>['after']>
+type NotificationReadHook = NonNullable<NonNullable<NonNullable<NotificationOptions['hooks']>['setRead']>['after']>
+type NotificationArchiveHook = NonNullable<
+    NonNullable<NonNullable<NotificationOptions['hooks']>['setArchived']>['after']
+>
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vite-plus/test'
 
-import type { NotificationOptions } from '../../packages/better-auth-notification/src/index'
+import type { NotificationOptions } from '../../packages/better-notif/src/index'
 import { content, setup } from '../utils'
 
 const cleanups: (() => void | Promise<void>)[] = []
@@ -14,10 +19,16 @@ afterEach(async () => {
 
 describe('notification plugin against real SQLite', () => {
     it('sends, lists, changes independent states, and calls hooks only on actual changes', async () => {
-        const onNotificationCreated = vi.fn<NonNullable<NotificationOptions['onNotificationCreated']>>()
-        const onReadStateChanged = vi.fn<NonNullable<NotificationOptions['onReadStateChanged']>>()
-        const onArchiveStateChanged = vi.fn<NonNullable<NotificationOptions['onArchiveStateChanged']>>()
-        const app = await setup({ onNotificationCreated, onReadStateChanged, onArchiveStateChanged })
+        const onNotificationCreated = vi.fn<NonNullable<NotificationCreateHook>>()
+        const onReadStateChanged = vi.fn<NonNullable<NotificationReadHook>>()
+        const onArchiveStateChanged = vi.fn<NonNullable<NotificationArchiveHook>>()
+        const app = await setup({
+            hooks: {
+                create: { after: onNotificationCreated },
+                setRead: { after: onReadStateChanged },
+                setArchived: { after: onArchiveStateChanged },
+            },
+        })
         cleanups.push(app.close)
         const user = await app.user()
         const send = await app.auth.api.sendNotification({
@@ -33,23 +44,42 @@ describe('notification plugin against real SQLite', () => {
         expect(onNotificationCreated.mock.calls[0]![0].recipient.user.plan).toBe('free')
         const id = item.notification.id
 
-        expect(await app.auth.api.getUnreadNotificationCount({ headers: user.headers })).toEqual({ count: 1 })
+        expect(await app.auth.api.getUnreadNotificationCount({ headers: user.headers })).toEqual({
+            count: 1,
+            hook: 'skipped',
+        })
         const list = await app.request('/notification/list', user.headers)
         expect(list.headers.get('cache-control')).toContain('no-store')
         const listed = await list.json()
         expect(listed.notifications[0]).not.toHaveProperty('idempotencyKey')
         expect(listed.notifications[0]).not.toHaveProperty('recipient')
 
-        await app.auth.api.setNotificationArchived({ headers: user.headers, body: { id, archived: true } })
-        expect(await app.auth.api.getUnreadNotificationCount({ headers: user.headers })).toEqual({ count: 0 })
+        await app.auth.api.setNotificationArchived({
+            headers: user.headers,
+            body: { id, archived: true },
+        })
+        expect(await app.auth.api.getUnreadNotificationCount({ headers: user.headers })).toEqual({
+            count: 0,
+            hook: 'skipped',
+        })
         expect((await app.auth.api.listNotifications({ headers: user.headers, query: {} })).total).toBe(0)
         expect(
-            (await app.auth.api.listNotifications({ headers: user.headers, query: { archived: 'archived' } }))
-                .notifications[0]?.readAt,
+            (
+                await app.auth.api.listNotifications({
+                    headers: user.headers,
+                    query: { archived: 'archived' },
+                })
+            ).notifications[0]?.readAt,
         ).toBeNull()
-        await app.auth.api.setNotificationArchived({ headers: user.headers, body: { id, archived: true } })
+        await app.auth.api.setNotificationArchived({
+            headers: user.headers,
+            body: { id, archived: true },
+        })
         expect(onArchiveStateChanged).toHaveBeenCalledTimes(1)
-        await app.auth.api.setNotificationArchived({ headers: user.headers, body: { id, archived: false } })
+        await app.auth.api.setNotificationArchived({
+            headers: user.headers,
+            body: { id, archived: false },
+        })
 
         const reads = await Promise.all(
             Array.from({ length: 8 }, () =>
@@ -65,7 +95,10 @@ describe('notification plugin against real SQLite', () => {
         ).toEqual(readAt)
         await app.auth.api.setNotificationRead({ headers: user.headers, body: { id, read: false } })
         expect(onReadStateChanged).toHaveBeenCalledTimes(2)
-        expect(await app.auth.api.getUnreadNotificationCount({ headers: user.headers })).toEqual({ count: 1 })
+        expect(await app.auth.api.getUnreadNotificationCount({ headers: user.headers })).toEqual({
+            count: 1,
+            hook: 'skipped',
+        })
     })
 
     it('enforces authentication, ownership, absent send HTTP routes, and user deletion', async () => {
@@ -82,12 +115,20 @@ describe('notification plugin against real SQLite', () => {
             expect((await app.request(path)).status).toBe(401)
         }
         expect(
-            (await app.request('/notification/set-read', new Headers(), { id: result.notification.id, read: true }))
-                .status,
+            (
+                await app.request('/notification/set-read', new Headers(), {
+                    id: result.notification.id,
+                    read: true,
+                })
+            ).status,
         ).toBe(401)
         expect(
-            (await app.request('/notification/set-read', other.headers, { id: result.notification.id, read: true }))
-                .status,
+            (
+                await app.request('/notification/set-read', other.headers, {
+                    id: result.notification.id,
+                    read: true,
+                })
+            ).status,
         ).toBe(404)
         expect(
             (
@@ -118,10 +159,16 @@ describe('notification plugin against real SQLite', () => {
         const directory = await mkdtemp(join(tmpdir(), 'notification-'))
         cleanups.push(() => rm(directory, { recursive: true, force: true }))
         const filename = join(directory, 'auth.db')
-        const hook = vi.fn<NonNullable<NotificationOptions['onNotificationCreated']>>()
-        const first = await setup({ onNotificationCreated: hook }, filename)
+        const hook = vi.fn<NonNullable<NotificationCreateHook>>()
+        const first = await setup(
+            { fields: { data: { type: 'json', required: false } }, hooks: { create: { after: hook } } },
+            filename,
+        )
         cleanups.push(first.close)
-        const second = await setup({ onNotificationCreated: hook }, filename)
+        const second = await setup(
+            { fields: { data: { type: 'json', required: false } }, hooks: { create: { after: hook } } },
+            filename,
+        )
         cleanups.push(second.close)
         const user = await first.user()
         const body = {
@@ -142,7 +189,10 @@ describe('notification plugin against real SQLite', () => {
         expect(await first.ctx.adapter.count({ model: 'notification' })).toBe(1)
         first.close()
         second.close()
-        const restarted = await setup({ onNotificationCreated: hook }, filename)
+        const restarted = await setup(
+            { fields: { data: { type: 'json', required: false } }, hooks: { create: { after: hook } } },
+            filename,
+        )
         cleanups.push(restarted.close)
         const again = await restarted.auth.api.sendNotification({
             body: { ...body, notification: { ...content, data: { nested: { c: 3, b: 2 }, a: 1 } } },
@@ -163,9 +213,7 @@ describe('notification plugin against real SQLite', () => {
             throw new Error('provider credential must stay private')
         })
         const app = await setup({
-            onNotificationCreated: failing,
-            onReadStateChanged: failing,
-            onArchiveStateChanged: failing,
+            hooks: { create: { after: failing }, setRead: { after: failing }, setArchived: { after: failing } },
         })
         cleanups.push(app.close)
         const user = await app.user()

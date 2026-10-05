@@ -1,28 +1,66 @@
 import { DatabaseSync } from 'node:sqlite'
 
 import { betterAuth } from 'better-auth'
+import type { BetterAuthOptions } from 'better-auth'
 import { getMigrations } from 'better-auth/db/migration'
+import { testUtils } from 'better-auth/plugins'
 
-import { notification } from '../packages/better-auth-notification/src/index'
-import type { NotificationOptions } from '../packages/better-auth-notification/src/index'
+import { notification } from '../packages/better-notif/src/index'
+import type { NotificationOptions, NotificationFields, NotificationTypes } from '../packages/better-notif/src/index'
 
-export async function setup<TContext = undefined>(options: NotificationOptions<TContext> = {}, filename = ':memory:') {
+function fixtureTestUtils() {
+    const plugin = testUtils()
+    return {
+        ...plugin,
+        init(ctx: Parameters<typeof plugin.init>[0]) {
+            const { options, ...initialized } = plugin.init(ctx)
+            // Older public helper types include options: undefined, incompatible with exact optional properties.
+            return { ...initialized, ...(options === undefined ? {} : { options }) }
+        },
+    }
+}
+
+export async function setup<
+    TContext = undefined,
+    const F extends NotificationFields = {},
+    const K extends NotificationTypes = {},
+>(
+    options: NotificationOptions<TContext, F, K> = {},
+    filename = ':memory:',
+    hooks?: BetterAuthOptions['hooks'],
+    basePath = '/api/auth',
+) {
     const database = new DatabaseSync(filename)
     database.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;')
     const auth = betterAuth({
         database,
         baseURL: 'http://localhost:3000',
+        basePath,
         secret: 'notification-test-secret-at-least-thirty-two-characters',
         emailAndPassword: { enabled: true },
+        advanced: { disableOriginCheck: false, disableCSRFCheck: false },
         user: { additionalFields: { plan: { type: 'string', defaultValue: 'free', input: false } } },
-        plugins: [notification(options)],
+        plugins: [notification(options), fixtureTestUtils()] as const,
         logger: { disabled: true },
+        ...(hooks ? { hooks } : {}),
     })
     const migrations = await getMigrations(auth.options)
     await migrations.runMigrations()
     const ctx = await auth.$context
 
-    async function user(name = crypto.randomUUID()) {
+    async function createUser(name: string = crypto.randomUUID()) {
+        return ctx.test.saveUser(ctx.test.createUser({ name, email: `${name}@example.com` }))
+    }
+
+    async function user(name: string = crypto.randomUUID()) {
+        const saved = await createUser(name)
+        const { headers } = await ctx.test.login({ userId: saved.id })
+        headers.set('origin', 'http://localhost:3000')
+        return { id: saved.id, headers }
+    }
+
+    // Keep real signup for tests that need a credential account or exercise signup behavior.
+    async function signUp(name: string = crypto.randomUUID()) {
         const response = await auth.api.signUpEmail({
             body: { email: `${name}@example.com`, password: 'a-long-test-password', name },
             asResponse: true,
@@ -44,7 +82,7 @@ export async function setup<TContext = undefined>(options: NotificationOptions<T
         const requestHeaders = new Headers(headers)
         if (body !== undefined) requestHeaders.set('content-type', 'application/json')
         return auth.handler(
-            new Request(`http://localhost:3000/api/auth${path}`, {
+            new Request(`http://localhost:3000${basePath}${path}`, {
                 headers: requestHeaders,
                 method: body === undefined ? 'GET' : 'POST',
                 ...(body === undefined ? {} : { body: JSON.stringify(body) }),
@@ -56,7 +94,9 @@ export async function setup<TContext = undefined>(options: NotificationOptions<T
         auth,
         ctx,
         database,
+        createUser,
         user,
+        signUp,
         request,
         close: () => {
             if (database.isOpen) database.close()
