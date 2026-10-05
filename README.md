@@ -2,7 +2,9 @@
 
 Notifications for Better Auth: typed application fields, read/unread state, archiving, deletion, and application-owned delivery hooks.
 
-The first npm release is pending. Install a local tarball or a CI package preview; see [Contributing](CONTRIBUTING.md) for building one. Supported runtime and Better Auth ranges are declared in the [package manifest](packages/better-notif/package.json). SQLite is the tested database.
+The first npm release is pending. Install a local tarball or a CI package preview. Supported runtime and Better Auth ranges are declared in the [package manifest](packages/better-notif/package.json). SQLite is the tested database.
+
+Node 22.16.0 or newer is supported. Better Auth's built-in SQLite adapter uses `StatementSync.columns()`, added in that release. Repository development uses Vite+, which requires Node 22.18.0 or a supported newer release.
 
 ## Register the plugin
 
@@ -34,6 +36,7 @@ export const auth = betterAuth({
         'post.published': { required: ['postId'] },
         'invoice.ready': { required: ['amount'] },
       },
+      filterableFields: ['postId', 'amount'],
     }),
   ],
 })
@@ -78,7 +81,7 @@ Results contain `created`, `duplicate`, `skipped`, or `failed` per recipient. A 
 
 Each call scans at most 100 recipients. `recipients` accepts up to 10,000 explicit IDs; IDs are deduplicated and sorted. Use `limit` and the returned `nextCursor` to continue, keeping the other inputs consistent. Retry failed recipient IDs separately without a cursor. Lists and cursors reflect live data, so save an explicit audience in your application when a fixed snapshot is needed.
 
-`filter({ user, accounts, sessions, context })` can select recipients asynchronously. Add application data with `loadContext` on the plugin. Account credentials and session tokens are excluded; context is not persisted or sent to the browser. Existing duplicates skip context loading and filtering.
+`filter({ user, accounts, sessions, context })` can select recipients asynchronously. Add application data with `loadContext` on the plugin. Account/session queries run only when a filter, context loader, or creation hook needs them; creation-only hooks load them after persistence. Account credentials and session tokens are excluded; context is not persisted or sent to the browser. Existing duplicates skip context loading and filtering.
 
 ## Browser integration
 
@@ -108,9 +111,26 @@ await authClient.notification.deleteMany({ ids: ['one', 'two'] })
 
 Every browser operation requires a session and scopes database queries to that user. Foreign IDs behave like missing IDs. Bulk operations accept up to 100 IDs and return an item result for each attempted ID; they can partially succeed.
 
-`list` returns `{ notifications, total, nextOffset }`, newest first. Filters are `read: 'all' | 'read' | 'unread'` and `archived: 'all' | 'archived' | 'unarchived'`; the default is 20 unarchived notifications. `unreadCount()` excludes archived notifications. Archiving preserves read state; unarchive with `archived: false`.
+`list` returns `{ notifications, total, nextCursor, hasMore }`, ordered by creation time and ID descending. Pass `nextCursor` as `cursor` with the same filters to continue. Results reflect live data. Filters include `type`, `read: 'all' | 'read' | 'unread'`, `archived: 'all' | 'archived' | 'unarchived'`, and `fields: { postId: '123' }`. They apply before the page limit; `total` counts all matching records, including older unread entries. The default is 20 unarchived notifications.
 
-React and Vue clients expose `useNotifications()` and `useUnreadNotificationCount()`. Vanilla clients expose subscribable atoms under the same names. Mutations refresh subscribed list/count state, and session changes clear previous-user data. Refresh new arrivals with `authClient.notification.refetch()`; no polling or push connection is installed. Pass a list query to `refetch` to change the shared page/filter. SSR does not automatically fetch these queries.
+`fields` permits equality checks only for explicitly configured `filterableFields`. Values use native database types; dates also accept ISO strings over HTTP. Private fields, JSON/array fields, and fields with adapter transforms cannot be enabled. `unreadCount({ query: { type, fields, archived } })` uses the same filters and always counts unread records; it excludes archived records by default.
+
+React and Vue clients expose `useNotifications()` and `useUnreadNotificationCount()`. Vanilla clients expose subscribable atoms under the same names. These use the default shared view. For independent views, create one query instance per view:
+
+```ts
+const inbox = authClient.notification.createQuery({ read: 'unread' })
+const post = authClient.notification.createQuery({ fields: { postId: '123' }, limit: 10 })
+await post.refetch()
+const page = post.notifications.get().data
+await post.nextPage()
+await post.resetPage()
+post.dispose()
+inbox.dispose()
+```
+
+Instances expose `notifications` and `unreadCount` as Nanostores atoms for direct subscriptions or framework bindings, plus a stable query `key`. Their filters, pages, and errors remain independent. Release subscriptions and call `dispose()` when a view is removed. Mutations refresh active views; session changes clear every view and discard previous-user responses. Refresh server-side arrivals explicitly with the instance's `refetch()` or `authClient.notification.refetch()` for the default view. No polling or push connection is installed, and SSR subscriptions do not fetch automatically.
+
+Use Better Auth's `hooks.before` for application-specific permission checks on recipient mutation routes. Trusted server APIs require the caller's own authorization.
 
 ## Trusted server management
 
@@ -128,7 +148,7 @@ await auth.api.deleteUserNotifications({
 const count = await auth.api.getUserUnreadNotificationCount({ query: { userIds: ['user-1'] } })
 ```
 
-`userIds` is required: up to 100 IDs or explicit `'all'`. Listing and mutations also accept `ids`, `filter`, `limit`, and `cursor`. Supported filters are `type`, `read`, `archived`, and `createdBefore`. They process at most 100 records per call in ID order; continue with `nextCursor`. Mutation results are `updated`, `unchanged`, `deleted`, `not_found`, or `failed`. Failed IDs advance the cursor and need separate retries. These endpoints have no HTTP route; any application route wrapping them owns its authorization.
+`userIds` is required: up to 100 IDs or explicit `'all'`. Listing and mutations also accept `ids`, `filter`, `limit`, and `cursor`. Supported filters are `type`, `read`, `archived`, `fields`, and `createdBefore`. They process at most 100 records per call in ID order; continue with `nextCursor`. Mutation results are `updated`, `unchanged`, `deleted`, `not_found`, or `failed`. Failed IDs advance the cursor and need separate retries. These endpoints have no HTTP route; any application route wrapping them owns its authorization.
 
 Deletion is physical. Deleting a notification also removes its idempotency record, so sending the same key again can create a notification and run the creation hook again. There is no deletion hook or tombstone.
 
@@ -145,10 +165,10 @@ Hooks are awaited after successful writes. Duplicates and unchanged states skip 
 
 Reads do not replay input validators or defaults. `schemaStatus: 'legacy'` identifies removed kinds, missing required values, incompatible native field values, or failed output validation. Legacy fields are typed as `unknown`; notifications remain readable and manageable, and private fields remain excluded. `schemaStatus: 'current'` permits narrowing by `type`. It is not a claim that old records were rechecked against today's input refinements. Use `validator.output` for explicit read validation and migrate retained records when refining their contract. Failed output validation returns `null` for that field with legacy status.
 
-Adding, renaming, or removing columns requires an application migration, including any data backfill. Existing records from the earlier JSON design need an explicit migration into the chosen native columns. A legacy record without a content fingerprint cannot safely deduplicate a new send and reports a conflict; use a new logical event key where appropriate.
+Adding, renaming, or removing columns requires an application migration and any necessary data backfill. Native `modelName` and `fieldName` map existing table/column names. Records without a content fingerprint cannot safely deduplicate a new send and report a conflict.
 
-Actions contain `id`, `label`, and optional root-relative or HTTP(S) `href`. The app owns action execution and authorization. Limits and URL validation are defined in [schema.ts](packages/better-notif/src/schema.ts). See [Contributing](CONTRIBUTING.md) for development, compatibility checks, and the release workflow.
+Actions contain `id`, `label`, and optional root-relative or HTTP(S) `href`. The app owns action execution and authorization. Limits and URL validation are defined in [schema.ts](packages/better-notif/src/schema.ts).
 
 ## License
 
-[MIT](LICENSE), Copyright (c) 2026 Liria.
+[MIT](LICENSE), Copyright (c) 2026 Liry24.

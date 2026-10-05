@@ -1,6 +1,8 @@
 import type { BetterAuthPluginDBSchema } from '@better-auth/core/db'
 import * as z from 'zod'
 
+import type { NotificationFields, NotificationFieldFilters } from './fields'
+
 export const identifier = z.string().min(1).max(256)
 
 function isSafeHref(value: string) {
@@ -36,9 +38,10 @@ export const contentSchema = z.object({
         ),
 })
 
-export const listQuerySchema = z.object({
+export const listQuerySchema = z.strictObject({
     limit: z.coerce.number<number>().int().min(1).max(100).default(20),
-    offset: z.coerce.number<number>().int().min(0).max(Number.MAX_SAFE_INTEGER).default(0),
+    cursor: z.string().min(1).max(1024).optional(),
+    type: z.string().min(1).max(100).optional(),
     read: z.enum(['all', 'read', 'unread']).default('all'),
     archived: z.enum(['all', 'archived', 'unarchived']).default('unarchived'),
 })
@@ -64,4 +67,6 @@ export const schema = {
 export type NotificationAction = z.infer<typeof actionSchema>
 export type BaseInput = z.input<typeof contentSchema>
 export type BaseContent = z.output<typeof contentSchema>
-export type NotificationListQuery = z.input<typeof listQuerySchema>
+export type NotificationListQuery<F extends NotificationFields = {}> = z.input<typeof listQuerySchema> & {
+    fields?: NotificationFieldFilters<F> | undefined
+}

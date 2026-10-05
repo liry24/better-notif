@@ -12,13 +12,7 @@ it('bounds scanning, continues through empty matches, and evaluates live user da
     const app = await setup({ loadContext: ({ user }) => ({ allowed: user.plan === 'pro' }) })
     cleanups.push(app.close)
     const users = []
-    for (let i = 0; i < 5; i++)
-        users.push(
-            await app.ctx.internalAdapter.createUser(
-                { name: `user${i}`, email: `batch${i}@example.com` },
-                { method: 'email-password' },
-            ),
-        )
+    for (let i = 0; i < 5; i++) users.push(await app.createUser(`user${i}`))
     const ids = users.map((user) => user.id).toSorted()
     const filter = vi.fn<RecipientFilter<{ allowed: boolean }>>(async ({ user, accounts, sessions, context }) => {
         expect(user).toHaveProperty('email')
@@ -66,14 +60,8 @@ it('returns partial failures and supports explicit-ID retries with the same key'
         },
     })
     cleanups.push(app.close)
-    const good = await app.ctx.internalAdapter.createUser(
-        { name: 'good', email: 'good@example.com' },
-        { method: 'email-password' },
-    )
-    const bad = await app.ctx.internalAdapter.createUser(
-        { name: 'failure', email: 'bad@example.com' },
-        { method: 'email-password' },
-    )
+    const good = await app.createUser('good')
+    const bad = await app.createUser('failure')
     const body = {
         recipients: [good.id, bad.id, good.id, 'missing'],
         notification: content,
@@ -106,11 +94,12 @@ it('returns partial failures and supports explicit-ID retries with the same key'
 it('loads every related row without tokens, including beyond the adapter default page', async () => {
     const app = await setup()
     cleanups.push(app.close)
-    const user = await app.user()
+    const user = await app.signUp()
     for (let index = 0; index < 105; index++) {
         await app.ctx.internalAdapter.linkAccount({
             userId: user.id,
             providerId: `provider${index}`,
+            issuer: `https://provider${index}.example.com`,
             accountId: `account${index}`,
             accessToken: 'access-secret',
             refreshToken: 'refresh-secret',
@@ -168,12 +157,12 @@ it('paginates explicit recipients and notifications and filters unread archived 
             body: { ...body, recipients: [user.id], idempotencyKey: `page${i}` },
         })
     const page = await app.auth.api.listNotifications({ headers: user.headers, query: { limit: 2 } })
-    expect(page).toMatchObject({ total: 4, nextOffset: 2 })
+    expect(page).toMatchObject({ total: 4, hasMore: true })
     const next = await app.auth.api.listNotifications({
         headers: user.headers,
-        query: { limit: 2, offset: page.nextOffset! },
+        query: { limit: 2, cursor: page.nextCursor! },
     })
-    expect(next.nextOffset).toBeNull()
+    expect(next.nextCursor).toBeNull()
     expect(new Set([...page.notifications, ...next.notifications].map((item) => item.id)).size).toBe(4)
     const id = page.notifications[0]!.id
     await app.auth.api.setNotificationArchived({

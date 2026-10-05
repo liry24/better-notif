@@ -77,6 +77,15 @@ jobs:
               with: { persist-credentials: false }
             - uses: ./.github/actions/setup
             - run: vp run test:client
+    tooling-minimum:
+        permissions: { contents: read }
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+              with: { persist-credentials: false }
+            - uses: ./.github/actions/setup
+              with: { node-version: '22.18.0' }
+            - run: vp run check
     consumer:
         permissions: { contents: read }
         needs: build
@@ -84,10 +93,12 @@ jobs:
             fail-fast: false
             matrix:
                 include:
-                    - { package-manager: bun, better-auth: '1.7.7', runtime-node: '24.0.0' }
-                    - { package-manager: bun, better-auth: '>=1.7.7 <1.8.0' }
-                    - { package-manager: npm, better-auth: '>=1.7.7 <1.8.0' }
-                    - { package-manager: pnpm, better-auth: '>=1.7.7 <1.8.0' }
+                    - { package-manager: bun, better-auth: '1.7.0', runtime-node: '22.16.0' }
+                    - { package-manager: bun, better-auth: '^1.7.0', runtime-node: '22' }
+                    - { package-manager: bun, better-auth: '^1.7.0', runtime-node: '24.0.0' }
+                    - { package-manager: bun, better-auth: '^1.7.0' }
+                    - { package-manager: npm, better-auth: '^1.7.0' }
+                    - { package-manager: pnpm, better-auth: '^1.7.0' }
         env:
             NOTIFICATION_PACKAGE_MANAGER: ${{ matrix.package-manager }}
             NOTIFICATION_BETTER_AUTH_VERSION: ${{ matrix.better-auth }}
@@ -102,7 +113,7 @@ jobs:
             - run: vp run test:consumer
     ci-ok:
         if: always()
-        needs: [build, typecheck, lint, knip, unit, integration, client, consumer]
+        needs: [build, typecheck, lint, knip, unit, integration, client, tooling-minimum, consumer]
         runs-on: ubuntu-latest
         steps:
             - name: Require blocking jobs

@@ -1,12 +1,11 @@
 /* oxlint-disable no-await-in-loop -- Bounded sequential writes keep hook and adapter load predictable. */
-import type { AuthContext } from '@better-auth/core'
 import type { Where } from '@better-auth/core/db/adapter'
 import * as z from 'zod'
 
-import type { NotificationFields, NotificationKinds, NotificationModel } from './fields'
+import type { NotificationFields, NotificationFieldFilters, NotificationKinds, NotificationModel } from './fields'
 import { identifier } from './schema'
 import { setState } from './server'
-import type { HookStatus, Notification, NotificationOptions, StoredNotification } from './types'
+import type { HookStatus, Notification, NotificationContext, NotificationOptions, StoredNotification } from './types'
 
 const ids = z.array(identifier).min(1).max(100)
 const page = { limit: z.number().int().min(1).max(100).default(100), cursor: identifier.optional() }
@@ -15,6 +14,7 @@ export const notificationFilterSchema = z.strictObject({
     read: z.enum(['all', 'read', 'unread']).optional(),
     archived: z.enum(['all', 'archived', 'unarchived']).optional(),
     createdBefore: z.coerce.date<Date | string>().optional(),
+    fields: z.unknown().optional(),
 })
 export const userTargetSchema = z.strictObject({
     userIds: z.union([ids, z.literal('all')]),
@@ -23,8 +23,14 @@ export const userTargetSchema = z.strictObject({
     ...page,
 })
 export const ownBatchSchema = z.strictObject({ ids, ...page })
-export type NotificationFilter = z.input<typeof notificationFilterSchema>
-export type UserNotificationQuery = z.input<typeof userTargetSchema>
+export type NotificationFilter<F extends NotificationFields = {}> = Omit<
+    z.input<typeof notificationFilterSchema>,
+    'fields'
+> & { fields?: NotificationFieldFilters<F> }
+export type UserNotificationQuery<F extends NotificationFields = {}> = Omit<
+    z.input<typeof userTargetSchema>,
+    'filter'
+> & { filter?: NotificationFilter<F> }
 type Target = z.output<typeof userTargetSchema>
 
 export interface NotificationPage<F extends NotificationFields = {}, K extends NotificationKinds<F> = {}> {
@@ -42,10 +48,11 @@ export interface NotificationBatchResult<F extends NotificationFields = {}, K ex
     hasMore: boolean
 }
 
-function scope(target: Target): Where[] {
+function scope(target: Target, model: { filterWhere: (input: unknown) => Where[] }): Where[] {
     const where: Where[] =
         target.userIds === 'all' ? [] : [{ field: 'userId', operator: 'in', value: [...new Set(target.userIds)] }]
     const filter = target.filter
+    where.push(...model.filterWhere(filter?.fields))
     if (filter?.type !== undefined) where.push({ field: 'type', value: filter.type })
     if (filter?.createdBefore) where.push({ field: 'createdAt', operator: 'lt', value: filter.createdBefore })
     if (filter?.read && filter.read !== 'all')
@@ -56,14 +63,14 @@ function scope(target: Target): Where[] {
 }
 
 export async function listUserNotifications<F extends NotificationFields, K extends NotificationKinds<F>>(
-    ctx: AuthContext,
+    ctx: NotificationContext,
     model: NotificationModel<F, K>,
     target: Target,
 ): Promise<NotificationPage<F, K>> {
     const rows = await ctx.adapter.findMany<StoredNotification>({
         model: 'notification',
         where: [
-            ...scope(target),
+            ...scope(target, model),
             ...(target.ids ? [{ field: 'id', operator: 'in' as const, value: target.ids }] : []),
             ...(target.cursor ? [{ field: 'id', operator: 'gt' as const, value: target.cursor }] : []),
         ],
@@ -78,16 +85,23 @@ export async function listUserNotifications<F extends NotificationFields, K exte
     }
 }
 
-export async function unreadCount(ctx: AuthContext, userIds: Target['userIds']) {
+export async function unreadCount(
+    ctx: NotificationContext,
+    model: { filterWhere: (input: unknown) => Where[] },
+    target: Pick<Target, 'userIds' | 'filter'>,
+) {
     return {
         count: await ctx.adapter.count({
             model: 'notification',
-            where: scope({ userIds, limit: 100, filter: { read: 'unread', archived: 'unarchived' } }),
+            where: scope(
+                { ...target, limit: 100, filter: { archived: 'unarchived', ...target.filter, read: 'unread' } },
+                model,
+            ),
         }),
     }
 }
 
-export async function deleteNotification(ctx: AuthContext, userId: string, id: string) {
+export async function deleteNotification(ctx: NotificationContext, userId: string, id: string) {
     return {
         deleted:
             (await ctx.adapter.deleteMany({
@@ -101,13 +115,13 @@ export async function deleteNotification(ctx: AuthContext, userId: string, id: s
 }
 
 export async function mutateNotifications<TContext, F extends NotificationFields, K extends NotificationKinds<F>>(
-    ctx: AuthContext,
+    ctx: NotificationContext,
     options: NotificationOptions<TContext, F, K>,
     model: NotificationModel<F, K>,
     target: Target,
     operation: { field: 'readAt' | 'archivedAt'; value: boolean } | { field: 'delete' },
 ): Promise<NotificationBatchResult<F, K>> {
-    const where = scope(target)
+    const where = scope(target, model)
     // Explicit IDs also produce results for missing/foreign records without distinguishing them.
     const candidates = target.ids
         ? [...new Set(target.ids)]

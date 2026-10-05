@@ -57,10 +57,9 @@ it('validates content and query bounds without silently accepting duplicate acti
         }).success,
     ).toBe(false)
     expect(listQuerySchema.safeParse({ limit: 101 }).success).toBe(false)
-    expect(listQuerySchema.safeParse({ offset: -1 }).success).toBe(false)
+    expect(listQuerySchema.safeParse({ cursor: '' }).success).toBe(false)
     expect(listQuerySchema.parse({})).toEqual({
         limit: 20,
-        offset: 0,
         read: 'all',
         archived: 'unarchived',
     })

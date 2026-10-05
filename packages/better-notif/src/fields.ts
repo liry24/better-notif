@@ -1,5 +1,6 @@
 /* oxlint-disable no-await-in-loop -- Field validators run in declaration order before any recipient writes. */
 import type { BetterAuthPluginDBSchema, DBFieldAttribute, InferDBValueType } from '@better-auth/core/db'
+import type { Where } from '@better-auth/core/db/adapter'
 import type { StandardSchemaV1 } from '@standard-schema/spec'
 import { APIError } from 'better-auth/api'
 
@@ -8,6 +9,18 @@ import type { BaseContent, BaseInput } from './schema'
 import type { Notification, StoredNotification } from './types'
 
 export type NotificationFields = Record<string, DBFieldAttribute>
+export type NotificationFilterField<F extends NotificationFields> = {
+    [N in keyof F & string]: F[N]['returned'] extends false
+        ? never
+        : F[N] extends { transform: unknown }
+          ? never
+          : F[N]['type'] extends 'string' | 'number' | 'boolean' | 'date' | readonly string[]
+            ? N
+            : never
+}[keyof F & string]
+export type NotificationFieldFilters<F extends NotificationFields = {}> = keyof F extends never
+    ? Record<string, never>
+    : { [N in NotificationFilterField<F>]?: InferDBValueType<F[N]['type']> | null }
 export type NotificationKinds<F extends NotificationFields = NotificationFields> = Record<
     string,
     { required?: readonly (keyof F & string)[] }
@@ -153,6 +166,7 @@ async function fingerprint(value: unknown) {
 export function createNotificationModel<F extends NotificationFields, K extends NotificationKinds<F>>(
     config: NotificationSchema<F> | undefined,
     kinds: K | undefined,
+    filterableFields: readonly NotificationFilterField<F>[] = [],
 ) {
     const fields: NotificationFields = { ...config?.notification?.additionalFields }
     const registry: NotificationKinds | undefined = kinds && Object.keys(kinds).length ? { ...kinds } : undefined
@@ -284,7 +298,52 @@ export function createNotificationModel<F extends NotificationFields, K extends 
             schemaStatus: current ? 'current' : 'legacy',
         }
     }
-    return { schema, prepare, present }
+    const allowedFilters = new Set<string>(filterableFields)
+    for (const name of allowedFilters) {
+        const field = fields[name]
+        if (
+            !Object.hasOwn(fields, name) ||
+            !field ||
+            field.returned === false ||
+            field.transform ||
+            (!['string', 'number', 'boolean', 'date'].includes(String(field.type)) && !Array.isArray(field.type))
+        )
+            throw new Error(`Notification field cannot be filtered: ${name}`)
+    }
+    function filterWhere(input: unknown): Where[] {
+        if (input === undefined) return []
+        let values: unknown = input
+        if (typeof values === 'string') {
+            if (values.length > 16_384) invalid('Notification field filters are too large')
+            try {
+                values = JSON.parse(values)
+            } catch {
+                invalid('Invalid notification field filters')
+            }
+        }
+        if (!values || typeof values !== 'object' || Array.isArray(values))
+            invalid('Expected notification field filters')
+        const entries = Object.entries(values)
+        if (entries.length > 16) invalid('Too many notification field filters')
+        return entries.map(([name, raw]) => {
+            if (!allowedFilters.has(name)) invalid(`Notification field is not filterable: ${name}`)
+            const field = fields[name]!
+            const value: unknown = field.type === 'date' && typeof raw === 'string' ? new Date(raw) : raw
+            if (
+                value !== null &&
+                typeof value !== 'string' &&
+                typeof value !== 'number' &&
+                typeof value !== 'boolean' &&
+                !(value instanceof Date)
+            )
+                invalid(`Invalid notification filter value: ${name}`)
+            if (value !== null && (!matchesField(value, field) || (typeof value === 'string' && value.length > 2048)))
+                invalid(`Invalid notification filter value: ${name}`)
+            // Filter values use the native database type; write validators and transforms are never replayed.
+            return { field: name, value }
+        })
+    }
+    return { schema, prepare, present, filterWhere }
 }
 
 export type NotificationModel<F extends NotificationFields, K extends NotificationKinds<F>> = ReturnType<

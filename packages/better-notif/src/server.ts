@@ -1,11 +1,11 @@
 /* oxlint-disable no-await-in-loop -- Pagination depends on the previous cursor; sequential recipient writes bound database and hook load. */
-import type { AuthContext } from '@better-auth/core'
-import type { DBAdapter, Where } from '@better-auth/core/db/adapter'
+import type { Where } from '@better-auth/core/db/adapter'
 import { APIError } from 'better-auth/api'
 
 import type { NotificationFields, NotificationKinds, NotificationModel } from './fields'
 import type {
     HookStatus,
+    NotificationContext,
     NotificationOptions,
     RecipientAccount,
     RecipientContext,
@@ -18,7 +18,7 @@ import type {
 } from './types'
 
 export async function runHook<T>(
-    ctx: AuthContext,
+    ctx: NotificationContext,
     hook: ((event: T) => void | Promise<void>) | undefined,
     event: T,
 ): Promise<HookStatus> {
@@ -34,7 +34,7 @@ export async function runHook<T>(
 }
 
 async function related<T extends { id: string }>(
-    adapter: DBAdapter,
+    adapter: NotificationContext['adapter'],
     model: string,
     where: Where[],
     select: string[],
@@ -58,13 +58,21 @@ async function related<T extends { id: string }>(
     }
 }
 
-async function recipientData(ctx: AuthContext, recipientId: string): Promise<RecipientData> {
-    const user = await ctx.adapter.findOne<RecipientData['user']>({
-        model: 'user',
-        where: [{ field: 'id', value: recipientId }],
-    })
+async function recipientData(
+    ctx: NotificationContext,
+    recipientId: string,
+    includeRelated: boolean,
+    knownUser?: RecipientData['user'],
+): Promise<RecipientData> {
+    const user =
+        knownUser ??
+        (await ctx.adapter.findOne<RecipientData['user']>({
+            model: 'user',
+            where: [{ field: 'id', value: recipientId }],
+        }))
     if (!user)
         throw new APIError('NOT_FOUND', { code: 'NOTIFICATION_USER_NOT_FOUND', message: 'Recipient does not exist' })
+    if (!includeRelated) return { user, accounts: [], sessions: [] }
     const where: Where[] = [{ field: 'userId', value: recipientId }]
     const [accounts, sessions] = await Promise.all([
         related<RecipientAccount>(ctx.adapter, 'account', where, [
@@ -136,7 +144,7 @@ export interface SendInput<TContext> {
 }
 
 export async function send<TContext, F extends NotificationFields, K extends NotificationKinds<F>>(
-    ctx: AuthContext,
+    ctx: NotificationContext,
     options: NotificationOptions<TContext, F, K>,
     model: NotificationModel<F, K>,
     input: SendInput<TContext>,
@@ -157,7 +165,7 @@ export async function send<TContext, F extends NotificationFields, K extends Not
                   .filter((id) => input.cursor === undefined || id > input.cursor)
                   .slice(0, input.limit + 1)
     const results: RecipientResult<F, K>[] = []
-    // ponytail: scan at most 100 candidates per call; use application jobs and ID batches for large audiences.
+    // Scan at most 100 candidates per call; use application jobs and ID batches for large audiences.
     for (const userId of ids.slice(0, input.limit)) {
         try {
             results.push(await sendOne(ctx, options, model, input, userId))
@@ -179,7 +187,7 @@ export async function send<TContext, F extends NotificationFields, K extends Not
 }
 
 async function sendOne<TContext, F extends NotificationFields, K extends NotificationKinds<F>>(
-    ctx: AuthContext,
+    ctx: NotificationContext,
     options: NotificationOptions<TContext, F, K>,
     model: NotificationModel<F, K>,
     input: SendInput<TContext>,
@@ -192,10 +200,16 @@ async function sendOne<TContext, F extends NotificationFields, K extends Notific
     const existing = await ctx.adapter.findOne<StoredNotification>({ model: 'notification', where })
     if (existing) return duplicate(existing, input.contentHash, model)
 
-    const data = await recipientData(ctx, userId)
-    const recipient: RecipientContext<TContext> = { ...data, context: await options.loadContext?.(data) }
+    const base = await recipientData(ctx, userId, false)
+    let pendingRecipient: Promise<RecipientContext<TContext>> | undefined
+    const getRecipient = () =>
+        (pendingRecipient ??= (async () => {
+            const data = await recipientData(ctx, userId, true, base.user)
+            return { ...data, context: await options.loadContext?.(data) }
+        })())
+    if (options.loadContext) await getRecipient()
     if (input.filter) {
-        const matches = await input.filter(recipient)
+        const matches = await input.filter(await getRecipient())
         if (typeof matches !== 'boolean')
             throw new APIError('BAD_REQUEST', {
                 code: 'NOTIFICATION_INVALID_FILTER_RESULT',
@@ -225,11 +239,20 @@ async function sendOne<TContext, F extends NotificationFields, K extends Notific
         throw error
     }
     const notification = await model.present(created)
-    const hook = await runHook(ctx, options.onNotificationCreated, {
-        notification,
-        recipient,
-        idempotencyKey: input.idempotencyKey,
-    })
+    const onCreated = options.onNotificationCreated
+    const hook = await runHook(
+        ctx,
+        onCreated
+            ? async () => {
+                  await onCreated({
+                      notification,
+                      recipient: await getRecipient(),
+                      idempotencyKey: input.idempotencyKey,
+                  })
+              }
+            : undefined,
+        undefined,
+    )
     return { userId, status: 'created', notification, hook }
 }
 
@@ -254,7 +277,7 @@ async function duplicate<F extends NotificationFields, K extends NotificationKin
 }
 
 export async function setState<TContext, F extends NotificationFields, K extends NotificationKinds<F>>(
-    ctx: AuthContext,
+    ctx: NotificationContext,
     options: NotificationOptions<TContext, F, K>,
     model: NotificationModel<F, K>,
     userId: string,

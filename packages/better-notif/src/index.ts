@@ -1,4 +1,3 @@
-import type { Where } from '@better-auth/core/db/adapter'
 import type { BetterAuthPlugin } from 'better-auth'
 import { createAuthEndpoint, sessionMiddleware } from 'better-auth/api'
 import * as z from 'zod'
@@ -8,9 +7,11 @@ import {
     listUserNotifications,
     mutateNotifications,
     ownBatchSchema,
+    notificationFilterSchema,
     unreadCount,
     userTargetSchema,
 } from './management'
+import { listNotifications, notificationWhere } from './query'
 import { identifier, listQuerySchema } from './schema'
 import { send, setState } from './server'
 export type {
@@ -21,15 +22,17 @@ export type {
     NotificationBatchResult,
 } from './management'
 import { createNotificationModel } from './fields'
-import type { NotificationInput, NotificationFields, NotificationKinds } from './fields'
+import type { NotificationInput, NotificationFields, NotificationFieldFilters, NotificationKinds } from './fields'
 export type {
     NotificationInput,
     NotificationContent,
     NotificationFields,
     NotificationKinds,
     NotificationSchema,
+    NotificationFieldFilters,
+    NotificationFilterField,
 } from './fields'
-import type { NotificationList, NotificationOptions, RecipientFilter, StoredNotification } from './types'
+import type { NotificationOptions, RecipientFilter } from './types'
 
 export type { NotificationAction, NotificationListQuery } from './schema'
 export type {
@@ -53,7 +56,14 @@ export function notification<
     const F extends NotificationFields = {},
     const K extends NotificationKinds<F> = {},
 >(options: NotificationOptions<TContext, F, K> = {}) {
-    const model = createNotificationModel(options.schema, options.kinds)
+    const model = createNotificationModel(options.schema, options.kinds, options.filterableFields)
+    const querySchema = listQuerySchema.extend({ fields: z.custom<NotificationFieldFilters<F>>().optional() })
+    const countQuerySchema = querySchema.omit({ cursor: true, limit: true, read: true }).optional()
+    const targetSchema = userTargetSchema.extend({
+        filter: notificationFilterSchema
+            .extend({ fields: z.custom<NotificationFieldFilters<F>>().optional() })
+            .optional(),
+    })
     return {
         id: 'notification',
         schema: model.schema,
@@ -141,16 +151,15 @@ export function notification<
                         { field: 'archivedAt', value: ctx.body.archived },
                     ),
             ),
-            listUserNotifications: createAuthEndpoint.serverOnly(
-                { method: 'GET', query: userTargetSchema },
-                async (ctx) => listUserNotifications(ctx.context, model, ctx.query),
+            listUserNotifications: createAuthEndpoint.serverOnly({ method: 'GET', query: targetSchema }, async (ctx) =>
+                listUserNotifications(ctx.context, model, ctx.query),
             ),
             getUserUnreadNotificationCount: createAuthEndpoint.serverOnly(
-                { method: 'GET', query: userTargetSchema.pick({ userIds: true }) },
-                async (ctx) => unreadCount(ctx.context, ctx.query.userIds),
+                { method: 'GET', query: targetSchema.pick({ userIds: true, filter: true }) },
+                async (ctx) => unreadCount(ctx.context, model, ctx.query),
             ),
             setUserNotificationsRead: createAuthEndpoint.serverOnly(
-                { method: 'POST', body: userTargetSchema.extend({ read: z.boolean() }) },
+                { method: 'POST', body: targetSchema.extend({ read: z.boolean() }) },
                 async (ctx) =>
                     mutateNotifications(ctx.context, options, model, ctx.body, {
                         field: 'readAt',
@@ -158,7 +167,7 @@ export function notification<
                     }),
             ),
             setUserNotificationsArchived: createAuthEndpoint.serverOnly(
-                { method: 'POST', body: userTargetSchema.extend({ archived: z.boolean() }) },
+                { method: 'POST', body: targetSchema.extend({ archived: z.boolean() }) },
                 async (ctx) =>
                     mutateNotifications(ctx.context, options, model, ctx.body, {
                         field: 'archivedAt',
@@ -166,60 +175,35 @@ export function notification<
                     }),
             ),
             deleteUserNotifications: createAuthEndpoint.serverOnly(
-                { method: 'POST', body: userTargetSchema },
+                { method: 'POST', body: targetSchema },
                 async (ctx) => mutateNotifications(ctx.context, options, model, ctx.body, { field: 'delete' }),
             ),
             listNotifications: createAuthEndpoint(
                 '/notification/list',
                 {
                     method: 'GET',
-                    query: listQuerySchema,
+                    query: querySchema,
                     use: [sessionMiddleware],
                     metadata: { noStore: true },
                 },
-                async (ctx): Promise<NotificationList<F, K>> => {
-                    const { read, archived, limit, offset } = ctx.query
-                    const where: Where[] = [{ field: 'userId', value: ctx.context.session.user.id }]
-                    if (read !== 'all')
-                        where.push({ field: 'readAt', operator: read === 'unread' ? 'eq' : 'ne', value: null })
-                    if (archived !== 'all')
-                        where.push({
-                            field: 'archivedAt',
-                            operator: archived === 'unarchived' ? 'eq' : 'ne',
-                            value: null,
-                        })
-                    const [rows, total] = await Promise.all([
-                        ctx.context.adapter.findMany<StoredNotification>({
-                            model: 'notification',
-                            where,
-                            limit,
-                            offset,
-                            sortBy: { field: 'createdAt', direction: 'desc' },
-                        }),
-                        ctx.context.adapter.count({ model: 'notification', where }),
-                    ])
-                    return {
-                        notifications: await Promise.all(rows.map((row) => model.present(row))),
-                        total,
-                        nextOffset: rows.length > 0 && offset + rows.length < total ? offset + rows.length : null,
-                    }
-                },
+                async (ctx) => listNotifications(ctx.context, model, ctx.context.session.user.id, ctx.query),
             ),
             getUnreadNotificationCount: createAuthEndpoint(
                 '/notification/unread-count',
                 {
                     method: 'GET',
+                    query: countQuerySchema,
                     use: [sessionMiddleware],
                     metadata: { noStore: true },
                 },
                 async (ctx) => ({
                     count: await ctx.context.adapter.count({
                         model: 'notification',
-                        where: [
-                            { field: 'userId', value: ctx.context.session.user.id },
-                            { field: 'readAt', value: null },
-                            { field: 'archivedAt', value: null },
-                        ],
+                        where: notificationWhere(
+                            ctx.context.session.user.id,
+                            { archived: 'unarchived', ...ctx.query, read: 'unread' },
+                            model,
+                        ),
                     }),
                 }),
             ),

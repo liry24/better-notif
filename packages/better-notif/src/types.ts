@@ -1,7 +1,19 @@
-import type { Account, Session, User } from 'better-auth'
+import type { Account, AuthContext, Session, User } from 'better-auth'
 
-import type { NotificationContent, NotificationFields, NotificationKinds, NotificationSchema } from './fields'
+import type {
+    NotificationContent,
+    NotificationFields,
+    NotificationFilterField,
+    NotificationKinds,
+    NotificationSchema,
+} from './fields'
 import type { BaseContent } from './schema'
+
+// Depend on the capabilities used here, not unrelated plugin-registry inference.
+export type NotificationContext = Pick<AuthContext, 'adapter' | 'logger'> & {
+    options: Pick<AuthContext['options'], 'secondaryStorage'>
+    internalAdapter: Pick<AuthContext['internalAdapter'], 'listSessions'>
+}
 
 interface NotificationRecord {
     id: string
@@ -63,6 +75,7 @@ export interface NotificationOptions<
 > {
     schema?: NotificationSchema<F>
     kinds?: K
+    filterableFields?: readonly NotificationFilterField<F>[]
     loadContext?: (recipient: RecipientData) => TContext | Promise<TContext>
     onNotificationCreated?: (event: {
         notification: Notification<NoInfer<F>, NoInfer<K>>
@@ -87,7 +100,8 @@ export interface SendNotificationResult<F extends NotificationFields = {}, K ext
 export interface NotificationList<F extends NotificationFields = {}, K extends NotificationKinds<F> = {}> {
     notifications: Notification<F, K>[]
     total: number
-    nextOffset: number | null
+    nextCursor: string | null
+    hasMore: boolean
 }
 
 export type StoredNotification = BaseContent &

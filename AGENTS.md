@@ -8,6 +8,7 @@
 - Scope every recipient HTTP read/write to the session user. Do not persist recipient context or expose account/session credentials.
 - Keep client runtime imports separate from server code. In-flight responses from a previous user must not restore their data.
 - Tests use real SQLite. Consumer tests install a tarball in a fresh project; release tests must exercise `NOTIFICATION_TARBALL` without rebuilding or changing its hash.
+- Use public `testUtils` for ordinary fixtures. Retain real signup coverage where relevant and enable Origin/CSRF checks explicitly in test auth configurations.
 - Isolate consumer installation caches and verify installed files against the archive so concurrent checkouts cannot substitute another package.
 - Run `vp run check` before pushing. `ci-ok` directly requires all blocking jobs and accepts only success.
 - Preserve SHA-pinned Actions, minimal permissions, CodeQL, and the release gate that tests the exact archive to be published. Let the release workflow manage versions; tags, releases, merges, and publication require authorization.

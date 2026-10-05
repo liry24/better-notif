@@ -1,3 +1,4 @@
+import type { DBFieldAttribute } from '@better-auth/core/db'
 import { betterAuth } from 'better-auth'
 import { createAuthClient } from 'better-auth/client'
 import { createAuthClient as reactClient } from 'better-auth/react'
@@ -19,13 +20,14 @@ const fields = {
     hidden: { type: 'string', returned: false, input: false, defaultValue: 'internal' },
     priority: { type: 'number', defaultValue: 1 },
     source: { type: 'string' },
-} as const
+} as const satisfies Record<string, DBFieldAttribute>
 const kinds = { invoice: { required: ['amount'] }, post: { required: ['slug'] } } as const
 const typedAuth = betterAuth({
     plugins: [
         notification({
             schema: { notification: { additionalFields: fields } },
             kinds,
+            filterableFields: ['amount', 'slug'],
             loadContext: () => ({ organizationId: 'org' }),
             onNotificationCreated({ notification: item, recipient }) {
                 recipient.context?.organizationId.toUpperCase()
@@ -95,6 +97,16 @@ export async function schemaTypeContracts() {
         serverItem.amount.toFixed()
     }
     const response = await typedClient.notification.list({ query: {} })
+    await typedClient.notification.list({ query: { fields: { amount: 12 }, cursor: 'opaque-cursor' } })
+    const view = typedClient.notification.createQuery({ fields: { slug: 'item' }, read: 'unread' })
+    const viewed = view.notifications.get().data?.notifications[0]
+    if (viewed?.schemaStatus === 'current' && viewed.type === 'invoice') viewed.amount.toFixed()
+    // @ts-expect-error Private fields cannot be used in list filters.
+    typedClient.notification.createQuery({ fields: { hidden: 'internal' } })
+    // @ts-expect-error Filters consume native database types.
+    typedClient.notification.createQuery({ fields: { amount: '12' } })
+    // @ts-expect-error Cursor pagination replaces the former offset contract.
+    typedClient.notification.createQuery({ offset: 20 })
     const clientItem = response.data?.notifications[0]
     if (clientItem?.schemaStatus === 'current' && clientItem.type === 'post') clientItem.slug.toUpperCase()
     const changed = await typedClient.notification.setRead({ id: 'one', read: false })

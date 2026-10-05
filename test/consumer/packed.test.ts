@@ -53,9 +53,9 @@ it('installs and exercises the actual tarball in an isolated consumer', async ()
             entries.every((entry) => /^package\/(?:dist(?:\/.*)?|package.json|README.md|LICENSE)$/u.test(entry)),
         ).toBe(true)
         expect(entries).toContain('package/LICENSE')
-        expect(run('tar', ['-xOf', tarball, 'package/LICENSE'], directory)).toBe(
-            await readFile(join(root, 'LICENSE'), 'utf8'),
-        )
+        const license = run('tar', ['-xOf', tarball, 'package/LICENSE'], directory)
+        expect(license).toBe(await readFile(join(root, 'LICENSE'), 'utf8'))
+        expect(license.split(/\r?\n/u)[2]).toBe('Copyright (c) 2026 Liry24')
         const packedManifest = JSON.parse(run('tar', ['-xOf', tarball, 'package/package.json'], directory)) as {
             name: string
             version: string
@@ -66,7 +66,7 @@ it('installs and exercises the actual tarball in an isolated consumer', async ()
         expect(packedManifest.license).toBe('MIT')
         const archiveName = `better-notif-${before}.tgz`
         await copyFile(tarball, join(directory, archiveName))
-        const version = process.env.NOTIFICATION_BETTER_AUTH_VERSION ?? '1.7.7'
+        const version = process.env.NOTIFICATION_BETTER_AUTH_VERSION ?? '1.7.0'
         const manager = process.env.NOTIFICATION_PACKAGE_MANAGER ?? 'bun'
         assert(['bun', 'npm', 'pnpm'].includes(manager), 'Unsupported consumer package manager')
         await writeFile(
@@ -93,6 +93,14 @@ it('installs and exercises the actual tarball in an isolated consumer', async ()
         const installedDirectory = join(directory, 'node_modules/better-notif')
         const installedManifest: unknown = JSON.parse(await readFile(join(installedDirectory, 'package.json'), 'utf8'))
         expect(installedManifest).toEqual(packedManifest)
+        const installedAuth = JSON.parse(
+            await readFile(join(directory, 'node_modules/better-auth/package.json'), 'utf8'),
+        ) as { version: string }
+        const installedCore = JSON.parse(
+            await readFile(join(directory, 'node_modules/@better-auth/core/package.json'), 'utf8'),
+        ) as { version: string }
+        expect(installedAuth.version).toBe(installedCore.version)
+        if (/^\d+\.\d+\.\d+$/u.test(version)) assert.equal(installedAuth.version, version)
         for (const entry of entries.filter((name) => !name.endsWith('/') && name !== 'package/dist')) {
             const relativePath = entry.slice('package/'.length)
             const installedPath = resolve(installedDirectory, relativePath)
@@ -123,17 +131,21 @@ it('installs and exercises the actual tarball in an isolated consumer', async ()
             `import assert from 'node:assert/strict'
 import { DatabaseSync } from 'node:sqlite'
 import { betterAuth } from 'better-auth'
+import { createAuthClient } from 'better-auth/client'
 import { getMigrations } from 'better-auth/db/migration'
 import { notification } from 'better-notif'
+import { notificationClient } from 'better-notif/client'
 import * as z from 'zod'
 import * as v from 'valibot'
+const requestedNode = process.env.NOTIFICATION_NODE_VERSION
+if (requestedNode) assert(requestedNode.includes('.') ? process.versions.node === requestedNode : process.versions.node.startsWith(requestedNode + '.'))
 const additionalFields = {
   amount: { type: 'number', required: false, validator: { input: z.string().transform(Number) } },
   slug: { type: 'string', required: false, validator: { input: v.pipe(v.string(), v.trim()) } },
 } as const
 const kinds = { invoice: { required: ['amount'] }, post: { required: ['slug'] } } as const
 const database = new DatabaseSync(':memory:')
-export const auth = betterAuth({ database, baseURL: 'http://localhost:3000', secret: 'packed-consumer-secret-more-than-thirty-two-characters', emailAndPassword: { enabled: true }, plugins: [notification({ schema: { notification: { additionalFields } }, kinds, onNotificationCreated: ({ notification: item }) => { if (item.schemaStatus === 'current' && item.type === 'invoice') { const amount: number = item.amount; assert.equal(amount, 42) } } })], logger: { disabled: true } })
+export const auth = betterAuth({ database, baseURL: 'http://localhost:3000', secret: 'packed-consumer-secret-more-than-thirty-two-characters', emailAndPassword: { enabled: true }, advanced: { disableOriginCheck: false, disableCSRFCheck: false }, plugins: [notification({ schema: { notification: { additionalFields } }, kinds, filterableFields: ['amount', 'slug'], onNotificationCreated: ({ notification: item }) => { if (item.schemaStatus === 'current' && item.type === 'invoice') { const amount: number = item.amount; assert.equal(amount, 42) } } })], logger: { disabled: true } })
 await (await getMigrations(auth.options)).runMigrations()
 const registered = await auth.api.signUpEmail({ body: { name: 'Consumer', email: 'consumer@example.com', password: 'a-long-consumer-password' }, asResponse: true })
 assert.equal(registered.status, 200)
@@ -145,6 +157,17 @@ const cookie = registered.headers.getSetCookie().map((value) => value.split(';')
 const response = await auth.handler(new Request('http://localhost:3000/api/auth/notification/list', { headers: { cookie } }))
 assert.equal(response.status, 200)
 assert.equal((await response.json()).notifications[0].amount, 42)
+const packedClient = createAuthClient({ baseURL: 'http://localhost:3000', plugins: [notificationClient<typeof auth>()], fetchOptions: { customFetchImpl: (input, init) => {
+  const request = new Request(input, init)
+  request.headers.set('cookie', cookie)
+  request.headers.set('origin', 'http://localhost:3000')
+  return auth.handler(request)
+} } })
+const invoiceView = packedClient.notification.createQuery({ fields: { amount: 42 }, type: 'invoice' })
+await invoiceView.refetch()
+assert.equal(invoiceView.notifications.get().data?.total, 1)
+assert.equal(invoiceView.unreadCount.get().data?.count, 1)
+invoiceView.dispose()
 const page = await auth.api.listUserNotifications({ query: { userIds: [signup.user.id] } })
 const item = page.notifications[0]!
 if (item.schemaStatus === 'current' && item.type === 'invoice') { const amount: number = item.amount; assert.equal(amount, 42) }
@@ -170,6 +193,13 @@ database.close()
 import { notificationClient } from 'better-notif/client'
 import type { auth } from './consumer.ts'
 export const client = createAuthClient({ plugins: [notificationClient<typeof auth>()] })
+const view = client.notification.createQuery({ fields: { amount: 42 }, read: 'unread' })
+const queryItem = view.notifications.get().data?.notifications[0]
+if (queryItem?.schemaStatus === 'current' && queryItem.type === 'invoice') { const amount: number = queryItem.amount; void amount }
+// @ts-expect-error Filters use native number values rather than validator input strings.
+client.notification.createQuery({ fields: { amount: '42' } })
+// @ts-expect-error Unknown additional fields cannot be queried.
+client.notification.createQuery({ fields: { missing: 'value' } })
 void client.notification.list({ query: {} }).then(({ data }) => {
   const item = data?.notifications[0]
   if (item?.schemaStatus === 'current' && item.type === 'invoice') {
@@ -192,12 +222,18 @@ void client.sendNotification({})
 `,
         )
         run(process.execPath, [join(directory, 'node_modules/typescript/bin/tsc'), '--noEmit'], directory)
+        // Test the published JavaScript runtime without requiring Node's newer TypeScript loader.
+        run(
+            'bun',
+            ['build', 'consumer.ts', '--target', 'node', '--packages', 'external', '--outfile', 'consumer.mjs'],
+            directory,
+        )
         const runtimeVersion = process.env.NOTIFICATION_NODE_VERSION
         if (runtimeVersion) {
-            assert(/^\d+\.\d+\.\d+$/u.test(runtimeVersion), 'Consumer Node version must be exact')
-            run('npm', ['exec', '--yes', '--package=node@' + runtimeVersion, '--', 'node', 'consumer.ts'], directory)
+            assert(/^(?:22|\d+\.\d+\.\d+)$/u.test(runtimeVersion), 'Expected an exact Node version or latest Node 22')
+            run('npm', ['exec', '--yes', '--package=node@' + runtimeVersion, '--', 'node', 'consumer.mjs'], directory)
         } else {
-            run(process.execPath, ['consumer.ts'], directory)
+            run(process.execPath, ['consumer.mjs'], directory)
         }
         await writeFile(
             join(directory, 'auth.ts'),
@@ -231,7 +267,9 @@ export const auth = betterAuth({ plugins: [notification({ schema: { notification
         expect(generated).not.toMatch(/postId:[^\n]*notNull/u)
         run('bun', ['build', 'client.ts', '--target', 'browser', '--outdir', 'bundle'], directory)
         const bundle = await readFile(join(directory, 'bundle/client.js'), 'utf8')
-        expect(bundle).not.toMatch(/createAuthEndpoint|Notification hook failed|node:sqlite/u)
+        expect(bundle).not.toMatch(
+            /createAuthEndpoint|createNotificationModel|Notification hook failed|node:sqlite|node:buffer/u,
+        )
         const after = createHash('sha256')
             .update(await readFile(tarball))
             .digest('hex')
