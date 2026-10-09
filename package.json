@@ -38,23 +38,18 @@
         "sherif": "^1.13.0",
         "typescript": "^7.0.2",
         "valibot": "^1.5.0",
-        "vite": "catalog:",
-        "vite-plus": "catalog:",
-        "vitest": "catalog:",
+        "vite": "npm:@voidzero-dev/vite-plus-core@1.0.0",
+        "vite-plus": "1.0.0",
+        "vitest": "5.0.1",
         "vue": "^3.5.43",
         "zod": "^4.5.4"
     },
     "overrides": {
-        "vite": "catalog:",
-        "vitest": "catalog:"
+        "vite": "npm:@voidzero-dev/vite-plus-core@1.0.0",
+        "vitest": "5.0.1"
     },
     "engines": {
         "node": "^22.18.0 || ^24.11.0 || >=26.0.0"
     },
-    "packageManager": "bun@1.4.2",
-    "catalog": {
-        "vite": "npm:@voidzero-dev/vite-plus-core@1.0.0",
-        "vitest": "5.0.1",
-        "vite-plus": "1.0.0"
-    }
+    "packageManager": "bun@1.4.2"
 }
