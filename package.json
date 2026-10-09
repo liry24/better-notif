@@ -23,7 +23,8 @@
         "test:runtime": "node test/runtime/packed.mjs",
         "typecheck": "tsc --noEmit -p packages/better-notif/tsconfig.json && tsc --noEmit -p test/tsconfig.json",
         "unused": "knip && knip --production",
-        "workspace:check": "sherif"
+        "workspace:check": "sherif",
+        "bundle:size": "bun run build && bun scripts/measure-bundles.mjs --package-root packages/better-notif"
     },
     "devDependencies": {
         "@better-auth/core": "1.7.0",
