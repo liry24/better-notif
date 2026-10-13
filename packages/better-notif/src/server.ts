@@ -55,14 +55,11 @@ async function recipientData(
     ctx: NotificationContext,
     recipientId: string,
     includeRelated: boolean,
-    knownUser?: RecipientData['user'],
 ): Promise<RecipientData> {
-    const user =
-        knownUser ??
-        (await ctx.adapter.findOne<RecipientData['user']>({
-            model: 'user',
-            where: [{ field: 'id', value: recipientId }],
-        }))
+    const user = await ctx.adapter.findOne<RecipientData['user']>({
+        model: 'user',
+        where: [{ field: 'id', value: recipientId }],
+    })
     if (!user)
         throw new APIError('NOT_FOUND', { code: 'NOTIFICATION_USER_NOT_FOUND', message: 'Recipient does not exist' })
     if (!includeRelated) return { user, accounts: [], sessions: [] }
@@ -296,8 +293,15 @@ export async function setState<TContext, F extends NotificationFields, K extends
     conditions: Where[] = [],
     actor: NotificationActor = serverActor(),
 ) {
-    const where: Where[] = [{ field: 'id', value: id }, { field: 'userId', value: userId }, ...conditions]
-    const previous = await ctx.adapter.findOne<StoredNotification>({ model: 'notification', where })
+    // Filters guard selection and the write; the saved state may no longer match them.
+    const where: Where[] = [
+        { field: 'id', value: id },
+        { field: 'userId', value: userId },
+    ]
+    const previous = await ctx.adapter.findOne<StoredNotification>({
+        model: 'notification',
+        where: [...where, ...conditions],
+    })
     if (!previous)
         throw new APIError('NOT_FOUND', { code: 'NOTIFICATION_NOT_FOUND', message: 'Notification not found' })
     const record = await model.present(previous)
@@ -323,7 +327,7 @@ export async function setState<TContext, F extends NotificationFields, K extends
         await before(hooks?.before, event)
         const changed = await ctx.adapter.updateMany({
             model: 'notification',
-            where: [...where, { field, operator: value ? 'eq' : 'ne', value: null }],
+            where: [...where, ...conditions, { field, operator: value ? 'eq' : 'ne', value: null }],
             update: { [field]: timestamp },
         })
         if (changed) {

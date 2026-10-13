@@ -29,6 +29,7 @@ export async function setup<
     filename = ':memory:',
     hooks?: BetterAuthOptions['hooks'],
     basePath = '/api/auth',
+    databaseOptions?: NonNullable<BetterAuthOptions['advanced']>['database'],
 ) {
     const database = new DatabaseSync(filename)
     database.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;')
@@ -38,7 +39,11 @@ export async function setup<
         basePath,
         secret: 'notification-test-secret-at-least-thirty-two-characters',
         emailAndPassword: { enabled: true },
-        advanced: { disableOriginCheck: false, disableCSRFCheck: false },
+        advanced: {
+            disableOriginCheck: false,
+            disableCSRFCheck: false,
+            ...(databaseOptions ? { database: databaseOptions } : {}),
+        },
         user: { additionalFields: { plan: { type: 'string', defaultValue: 'free', input: false } } },
         plugins: [notification(options), fixtureTestUtils()] as const,
         logger: { disabled: true },
