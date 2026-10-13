@@ -11,6 +11,58 @@ afterEach(() => {
     for (const close of cleanups.splice(0).toReversed()) close()
 })
 
+it.each(['serial', 'string'] as const)(
+    'pages numeric-looking %s IDs in database order across timestamp groups',
+    async (mode) => {
+        let nextId = 0
+        const app = await setup({}, ':memory:', undefined, '/api/auth', {
+            generateId:
+                mode === 'serial'
+                    ? 'serial'
+                    : ({ model }) => (model === 'notification' ? String(++nextId) : crypto.randomUUID()),
+        })
+        cleanups.push(app.close)
+        const owner = await app.user()
+        for (let index = 1; index <= 12; index++) {
+            const sent = await app.auth.api.sendNotification({
+                body: { recipients: [owner.id], idempotencyKey: `numeric-${index}`, notification: content },
+            })
+            const row = sent.results[0]!
+            if (row.status !== 'created') throw new Error('Expected created notification')
+            expect(row.notification.id).toBe(String(index))
+            await app.ctx.adapter.update({
+                model: 'notification',
+                where: [{ field: 'id', value: row.notification.id }],
+                update: { createdAt: new Date(index === 2 || index === 10 ? '2026-02-01' : '2026-01-01') },
+            })
+        }
+        // The first tie group is completed locally; the boundary and cursor groups use SQL ordering.
+        const expected = (
+            app.database.prepare('SELECT id FROM notification ORDER BY createdAt DESC, id DESC').all() as {
+                id: string | number
+            }[]
+        ).map((row) => String(row.id))
+        expect(expected.slice(0, 2)).toEqual(mode === 'serial' ? ['10', '2'] : ['2', '10'])
+        for (const limit of [1, 2, 3, 4]) {
+            const seen: string[] = []
+            let cursor: string | null = null
+            for (let page = 0; page < 13; page++) {
+                const result: Awaited<ReturnType<typeof app.auth.api.listNotifications>> =
+                    await app.auth.api.listNotifications({
+                        headers: owner.headers,
+                        query: { limit, ...(cursor ? { cursor } : {}) },
+                    })
+                expect(result.total).toBe(12)
+                seen.push(...result.notifications.map((row) => row.id))
+                cursor = result.nextCursor
+                if (!result.hasMore) break
+            }
+            expect(cursor).toBeNull()
+            expect(seen).toEqual(expected)
+        }
+    },
+)
+
 it('filters before paging, counts the complete result, and traverses timestamp ties without duplicates', async () => {
     const app = await setup({
         fields: {

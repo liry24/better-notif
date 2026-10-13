@@ -136,6 +136,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { betterAuth } from 'better-auth'
 import { createAuthClient } from 'better-auth/client'
 import { getMigrations } from 'better-auth/db/migration'
+import { testUtils } from 'better-auth/plugins'
 import { notification, type NotificationFields, type NotificationTypes } from 'better-notif'
 import { notificationClient } from 'better-notif/client'
 import * as z from 'zod'
@@ -260,6 +261,41 @@ if (false) {
   await auth.api.sendNotification({ body: { ...body, notification: { type: 'unknown', title: 'Bad' } } })
 }
 database.close()
+
+const serialDatabase = new DatabaseSync(':memory:')
+let stateHooks = 0
+const serialAuth = betterAuth({ database: serialDatabase, baseURL: 'http://localhost:3000', secret: 'serial-consumer-secret-more-than-thirty-two-characters', advanced: { database: { generateId: 'serial' }, disableOriginCheck: false, disableCSRFCheck: false }, plugins: [notification({ hooks: { setRead: { after: () => { stateHooks++ } }, setArchived: { after: () => { stateHooks++ } } } }), testUtils()], logger: { disabled: true } })
+await (await getMigrations(serialAuth.options)).runMigrations()
+const serialContext = await serialAuth.$context
+const serialUser = await serialContext.test.saveUser(serialContext.test.createUser())
+const { headers: serialHeaders } = await serialContext.test.login({ userId: serialUser.id })
+serialHeaders.set('origin', 'http://localhost:3000')
+for (let index = 1; index <= 12; index++) {
+  const sent = await serialAuth.api.sendNotification({ body: { recipients: [serialUser.id], idempotencyKey: 'serial-' + index, notification: { type: 'event', title: 'Serial event' } } })
+  const result = sent.results[0]!
+  assert.equal(result.status, 'created')
+  if (result.status !== 'created') throw new Error('Expected created serial notification')
+  assert.equal(result.notification.id, String(index))
+  await serialContext.adapter.update({ model: 'notification', where: [{ field: 'id', value: result.notification.id }], update: { createdAt: new Date(index === 2 || index === 10 ? '2026-02-01' : '2026-01-01') } })
+}
+const serialIds: string[] = []
+let serialCursor: string | null = null
+for (let pageIndex = 0; pageIndex < 7; pageIndex++) {
+  const result: Awaited<ReturnType<typeof serialAuth.api.listNotifications>> = await serialAuth.api.listNotifications({ headers: serialHeaders, query: { limit: 2, ...(serialCursor ? { cursor: serialCursor } : {}) } })
+  serialIds.push(...result.notifications.map((row) => row.id))
+  serialCursor = result.nextCursor
+  if (!result.hasMore) break
+}
+assert.equal(serialCursor, null)
+assert.deepEqual(serialIds, ['10', '2', '12', '11', '9', '8', '7', '6', '5', '4', '3', '1'])
+const read = await serialAuth.api.setUserNotificationsRead({ body: { userIds: [serialUser.id], filter: { read: 'unread' }, read: true } })
+assert.equal(read.results.length, 12)
+assert(read.results.every((result) => result.status === 'updated' && result.hook === 'completed' && result.notification.readAt instanceof Date))
+const archived = await serialAuth.api.setUserNotificationsArchived({ body: { userIds: [serialUser.id], filter: { archived: 'unarchived' }, archived: true } })
+assert.equal(archived.results.length, 12)
+assert(archived.results.every((result) => result.status === 'updated' && result.hook === 'completed' && result.notification.archivedAt instanceof Date))
+assert.equal(stateHooks, 24)
+serialDatabase.close()
 `,
         )
         await writeFile(

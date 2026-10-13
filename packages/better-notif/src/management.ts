@@ -136,19 +136,16 @@ export async function mutateNotifications<TContext, F extends NotificationFields
     for (const id of candidates.slice(0, target.limit)) {
         try {
             const ownedWhere: Where[] = [...where, { field: 'id', value: id }]
-            if (operation.field === 'delete') {
-                const row = await ctx.adapter.findOne<StoredNotification>({ model: 'notification', where: ownedWhere })
-                const result = row
-                    ? await deleteRecord(ctx, options, model, row.userId, id, where, actor)
-                    : { deleted: false, hook: 'skipped' as const }
-                results.push(
-                    result.deleted ? { id, status: 'deleted', hook: result.hook } : { id, status: 'not_found' },
-                )
-                continue
-            }
             const row = await ctx.adapter.findOne<StoredNotification>({ model: 'notification', where: ownedWhere })
             if (!row) {
                 results.push({ id, status: 'not_found' })
+                continue
+            }
+            if (operation.field === 'delete') {
+                const result = await deleteRecord(ctx, options, model, row.userId, id, where, actor)
+                results.push(
+                    result.deleted ? { id, status: 'deleted', hook: result.hook } : { id, status: 'not_found' },
+                )
                 continue
             }
             const result = await setState(

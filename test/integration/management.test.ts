@@ -7,6 +7,98 @@ afterEach(() => {
     for (const close of cleanups.splice(0)) close()
 })
 
+it.each(['read', 'archived'] as const)(
+    'returns persisted %s state and runs after hooks when leaving a filter',
+    async (field) => {
+        const before = vi.fn<() => void>()
+        const after = vi.fn<() => void>()
+        const app = await setup({
+            hooks: { setRead: { before, after }, setArchived: { before, after } },
+        })
+        cleanups.push(app.close)
+        const owner = await app.user()
+        const foreign = await app.user()
+        const sent = await app.auth.api.sendNotification({
+            body: { recipients: [owner.id, foreign.id], idempotencyKey: 'filtered-state', notification: content },
+        })
+        const row = sent.results.find((result) => result.userId === owner.id)!
+        if (row.status !== 'created') throw new Error('Expected created notification')
+        const id = row.notification.id
+        const timestamp = expect.any(Date)
+        for (const value of [true, false]) {
+            const filter =
+                field === 'read'
+                    ? { read: value ? ('unread' as const) : ('read' as const) }
+                    : { archived: value ? ('unarchived' as const) : ('archived' as const) }
+            const target = { userIds: [owner.id], filter }
+            const result =
+                field === 'read'
+                    ? await app.auth.api.setUserNotificationsRead({ body: { ...target, read: value } })
+                    : await app.auth.api.setUserNotificationsArchived({ body: { ...target, archived: value } })
+            const state = { [field + 'At']: value ? timestamp : null }
+            expect(result.results).toEqual([
+                {
+                    id,
+                    status: 'updated',
+                    hook: 'completed',
+                    notification: expect.objectContaining(state),
+                },
+            ])
+            expect(after).toHaveBeenLastCalledWith(
+                expect.objectContaining({
+                    record: expect.objectContaining(state),
+                    previous: expect.objectContaining({ [field + 'At']: value ? null : timestamp }),
+                }),
+            )
+            const repeat =
+                field === 'read'
+                    ? await app.auth.api.setUserNotificationsRead({ body: { ...target, ids: [id], read: value } })
+                    : await app.auth.api.setUserNotificationsArchived({
+                          body: { ...target, ids: [id], archived: value },
+                      })
+            expect(repeat.results).toEqual([{ id, status: 'not_found' }])
+        }
+        expect(before).toHaveBeenCalledTimes(2)
+        expect(after).toHaveBeenCalledTimes(2)
+        expect(
+            (await app.auth.api.listUserNotifications({ query: { userIds: [foreign.id] } })).notifications[0],
+        ).toMatchObject({ readAt: null, archivedAt: null })
+    },
+)
+
+it('rechecks management filters at the write and skips after hooks when the record no longer matches', async () => {
+    const before = vi.fn<() => Promise<void>>()
+    const after = vi.fn<() => void>()
+    const app = await setup({ hooks: { setRead: { before, after } } })
+    cleanups.push(app.close)
+    const owner = await app.user()
+    const sent = await app.auth.api.sendNotification({
+        body: { recipients: [owner.id], idempotencyKey: 'filter-race', notification: content },
+    })
+    const row = sent.results[0]!
+    if (row.status !== 'created') throw new Error('Expected created notification')
+    before.mockImplementation(async () => {
+        await app.ctx.adapter.update({
+            model: 'notification',
+            where: [{ field: 'id', value: row.notification.id }],
+            update: { archivedAt: new Date() },
+        })
+    })
+    const result = await app.auth.api.setUserNotificationsRead({
+        body: { userIds: [owner.id], filter: { read: 'unread', archived: 'unarchived' }, read: true },
+    })
+    expect(result.results).toEqual([
+        {
+            id: row.notification.id,
+            status: 'unchanged',
+            hook: 'skipped',
+            notification: expect.objectContaining({ readAt: null, archivedAt: expect.any(Date) }),
+        },
+    ])
+    expect(before).toHaveBeenCalledTimes(1)
+    expect(after).not.toHaveBeenCalled()
+})
+
 it('scopes every client operation to its session and permits explicit trusted server targets', async () => {
     const readHook = vi.fn<() => void>()
     const app = await setup({ hooks: { setRead: { after: readHook } } })
