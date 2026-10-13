@@ -13,7 +13,7 @@ import type { BaseContent } from './schema'
 
 // Depend on the capabilities used here, not unrelated plugin-registry inference.
 export type NotificationContext = Pick<AuthContext, 'adapter' | 'logger'> & {
-    options: Pick<AuthContext['options'], 'secondaryStorage'>
+    options: Pick<AuthContext['options'], 'secondaryStorage' | 'advanced'>
     internalAdapter: Pick<AuthContext['internalAdapter'], 'listSessions'>
 }
 interface NotificationRecord {

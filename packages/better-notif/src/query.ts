@@ -67,11 +67,14 @@ async function pageRows(ctx: NotificationContext, where: Where[], limit: number,
     // The adapter supports one sort field. Complete only the boundary timestamp's tie group,
     // then sort the already complete groups locally; each native query remains bounded.
     const boundary = older.at(-1)!.createdAt
+    // Better Auth returns serial IDs as strings but compares cursor IDs as numbers.
+    const serial = ctx.options.advanced?.database?.generateId === 'serial'
     const complete = older
         .filter((row) => row.createdAt.getTime() > boundary.getTime())
         .toSorted(
             (a, b) =>
-                b.createdAt.getTime() - a.createdAt.getTime() || Buffer.compare(Buffer.from(b.id), Buffer.from(a.id)),
+                b.createdAt.getTime() - a.createdAt.getTime() ||
+                (serial ? Number(b.id) - Number(a.id) : Buffer.compare(Buffer.from(b.id), Buffer.from(a.id))),
         )
     const boundaryRows = await fetch(
         [{ field: 'createdAt', value: boundary }],
